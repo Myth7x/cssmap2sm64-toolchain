@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from .cli import build_parser
-from .stages import decompile, unpack_pak, blend_run
+from .stages import decompile, unpack_pak, blend_run, find_spawn
 
 _ROOT = Path(__file__).parent.parent
 _VENDOR = _ROOT / "vendor"
@@ -80,6 +80,17 @@ def main():
     print("[1/4] Decompiling BSP...")
     decompile.run(cfg["java_path"], str(bspsource_jar), str(bsp), str(vmf_path))
 
+    print("  Extracting spawn point...")
+    spawn_raw = find_spawn.find_spawn(str(vmf_path))
+    if spawn_raw is None:
+        print("  [warn] No spawn entity found, using origin (0, 0, 0)")
+        spawn_bl = (0.0, 0.0, 0.0)
+    else:
+        sx, sy, sz = spawn_raw
+        scale = cfg["scale_factor"]
+        spawn_bl = (sx * scale, sz * scale, sy * scale)
+        print(f"  Spawn source={spawn_raw} -> blender={spawn_bl}")
+
     print("[2/4] Extracting PAK textures...")
     vtf_files = unpack_pak.extract_pak(str(bsp), str(tex_dir))
     for vtf in vtf_files:
@@ -109,6 +120,7 @@ def main():
             level_name=cfg["level_name"],
             area_id=cfg["area_id"],
             scale=cfg["blender_to_sm64_scale"],
+            spawn=spawn_bl,
         )
         print(f"Done. Level exported to {sm64_out}/")
 
