@@ -8,7 +8,6 @@ in/*
 *.obj
 *.vmf
 *.png
-*.txt
 __pycache__/*
 *.log
 *.pyc
