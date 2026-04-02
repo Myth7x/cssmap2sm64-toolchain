@@ -18,3 +18,4 @@ license*
 node_modules/*
 src/config-gen/node_modules/*
 src/config-gen/dist/*
+pipeline.json*

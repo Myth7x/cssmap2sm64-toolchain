@@ -54,6 +54,8 @@ python -m cssmap2sm64 yourmap.bsp
 - Tool: Fast64 (Blender plugin)
 - Convert `.blend` scene into SM64-compatible level data
 
+### 5. (Optional) Convert to compatible native map format NEED IMPLEMENTATION
+
 ---
 
 ## Notes
