@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from .cli import build_parser
-from .stages import decompile, unpack_pak, blend_run, find_spawn
+from .stages import decompile, unpack_pak, blend_run, find_spawn, f64_to_native
 
 _ROOT = Path(__file__).parent.parent
 _VENDOR = _ROOT / "vendor"
@@ -107,10 +107,10 @@ def main():
     subprocess.run(vmf2obj_cmd, check=True)
 
     if args.no_blend:
-        print(f"[4/4] Skipped (--no-blend). OBJ: {obj_path}")
+        print(f"[4/5] Skipped (--no-blend). OBJ: {obj_path}")
         print(f"Done. Output in {out}/")
     else:
-        print("[4/4] Exporting to SM64 via Blender/Fast64...")
+        print("[4/5] Exporting to SM64 via Blender/Fast64...")
         sm64_out = out / "sm64_level"
         blend_run.run(
             blender=str(blender_path),
@@ -122,7 +122,12 @@ def main():
             scale=cfg["blender_to_sm64_scale"],
             spawn=spawn_bl,
         )
-        print(f"Done. Level exported to {sm64_out}/")
+        level_name = cfg["level_name"]
+        print("[5/5] Converting Fast64 output to native sm64-port format...")
+        native_out = out / "native_level" / level_name
+        f64_to_native.convert(sm64_out / level_name, native_out, level_name)
+        print(f"Done. Native level in {native_out}/")
+        print(f"  -> copy to sm64-port/levels/{level_name}/")
 
 
 if __name__ == "__main__":
