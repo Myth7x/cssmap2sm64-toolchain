@@ -59,6 +59,12 @@ const fs = require('fs');
         },
         {
             type: 'number',
+            name: 'collision_divisor',
+            message: 'Collision scale divisor (divides Fast64 coords to fit s16 ±32768)',
+            initial: 150
+        },
+        {
+            type: 'number',
             name: 'texture_resolution_limit',
             message: 'Max texture dimension',
             initial: 512

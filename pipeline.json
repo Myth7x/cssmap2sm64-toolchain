@@ -2,10 +2,11 @@
   "decomp_path": "",
   "blender_path": "E:\\SteamLibrary\\steamapps\\common\\Blender\\blender.exe",
   "java_path": "java",
-  "level_name": "bhop_fuckapoy2",
+  "level_name": "bhop_arcane",
   "is_custom_level": true,
   "area_id": 1,
   "scale_factor": 1.0,
   "blender_to_sm64_scale": 300,
+  "collision_divisor": 150,
   "texture_resolution_limit": 512
 }

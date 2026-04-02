@@ -41,6 +41,7 @@ def main():
 
     cfg.setdefault("scale_factor", 1.0)
     cfg.setdefault("blender_to_sm64_scale", 300)
+    cfg.setdefault("collision_divisor", 150)
     cfg.setdefault("area_id", 1)
     cfg.setdefault("is_custom_level", True)
     cfg.setdefault("texture_resolution_limit", 512)
@@ -85,11 +86,18 @@ def main():
     if spawn_raw is None:
         print("  [warn] No spawn entity found, using origin (0, 0, 0)")
         spawn_bl = (0.0, 0.0, 0.0)
+        sm64_spawn = (0, 0, 0)
     else:
         sx, sy, sz = spawn_raw
         scale = cfg["scale_factor"]
         spawn_bl = (sx * scale, sz * scale, sy * scale)
-        print(f"  Spawn source={spawn_raw} -> blender={spawn_bl}")
+        net = cfg["blender_to_sm64_scale"] / cfg["collision_divisor"]
+        sm64_spawn = (
+            round(sx * scale * net),
+            round(sz * scale * net),
+            round(sy * scale * net),
+        )
+        print(f"  Spawn source={spawn_raw} -> blender={spawn_bl} -> sm64={sm64_spawn}")
 
     print("[2/4] Extracting PAK textures...")
     vtf_files = unpack_pak.extract_pak(str(bsp), str(tex_dir))
@@ -125,7 +133,13 @@ def main():
         level_name = cfg["level_name"]
         print("[5/5] Converting Fast64 output to native sm64-port format...")
         native_out = out / "native_level" / level_name
-        f64_to_native.convert(sm64_out / level_name, native_out, level_name)
+        f64_to_native.convert(
+            sm64_out / level_name,
+            native_out,
+            level_name,
+            collision_divisor=cfg["collision_divisor"],
+            sm64_spawn=sm64_spawn,
+        )
         print(f"Done. Native level in {native_out}/")
         print(f"  -> copy to sm64-port/levels/{level_name}/")
 
