@@ -17,3 +17,6 @@ __pycache__/*
 *.md
 license*
 *.ico
+node_modules/*
+src/config-gen/node_modules/*
+src/config-gen/dist/*
