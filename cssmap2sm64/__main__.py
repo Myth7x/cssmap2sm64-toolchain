@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -140,7 +141,20 @@ def main():
             collision_divisor=cfg["collision_divisor"],
             sm64_spawn=sm64_spawn,
         )
-        print(f"Done. Native level in {native_out}/")
+
+        sm64_port_path = cfg.get("sm64_port_path", "")
+        if sm64_port_path:
+            sm64_port = Path(sm64_port_path)
+            dest = sm64_port / "levels" / level_name
+            bk_dest = sm64_port / "levels" / f"bk_{level_name}"
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(native_out, dest)
+            if bk_dest.exists():
+                shutil.rmtree(bk_dest)
+            print(f"  -> deployed to {dest}")
+        else:
+            print(f"Done. Native level in {native_out}/")
         print(f"  -> copy to sm64-port/levels/{level_name}/")
 
 

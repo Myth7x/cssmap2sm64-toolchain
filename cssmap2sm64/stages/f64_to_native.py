@@ -44,6 +44,8 @@ def _write_header(src: Path, dst: Path, level_name: str) -> None:
         f'#include "types.h"\n\n'
         + content
         + f"\nextern const LevelScript level_{level_name}_entry[];\n"
+        + f"\nextern const LevelScript level_{level_name}_entry[];\n"
+        + f"\nextern const LevelScript level_{level_name}_entry[];\n"
         + f"\n#endif\n"
     )
     dst.write_text(out, encoding="utf-8")
@@ -81,22 +83,38 @@ def _scale_collision(src: Path, dst: Path, divisor: int) -> None:
 
 
 def _write_script(
-    src: Path,
-    dst: Path,
-    sm64_spawn: Optional[Tuple[int, int, int]] = None,
+    src: Path = Path("script.c"),
+    dst: Path = Path("script.c"),
+    sm64_spawn: Optional[Tuple[int, int, int]] = None
 ) -> None:
-    text = src.read_text(encoding="utf-8")
-    lines = text.splitlines(keepends=True)
-    result = []
-    for line in lines:
-        if re.match(r'\s*MARIO_POS\s*\(', line):
-            if sm64_spawn is not None:
-                indent = re.match(r'(\s*)', line).group(1)
-                x, y, z = sm64_spawn
-                result.append(f"{indent}MARIO_POS(0x01, 0, {x}, {y}, {z}),\n")
-            continue
-        result.append(line)
-    dst.write_text("".join(result), encoding="utf-8")
+    #text = src.read_text(encoding="utf-8")
+    #lines = text.splitlines(keepends=True)
+    #result = []
+    #for line in lines:
+    #    if re.match(r'\s*MARIO_POS\s*\(', line):
+    #        if sm64_spawn is not None:
+    #            indent = re.match(r'(\s*)', line).group(1)
+    #            x, y, z = sm64_spawn
+    #            result.append(f"{indent}MARIO_POS(0x01, 0, {x}, {y}, {z}),\n")
+    #        continue
+    #    result.append(line)
+    #dst.write_text("".join(result), encoding="utf-8")
+    try:
+        text = src.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    if sm64_spawn is not None:
+        spawn_cmd = f"    MARIO_POS(0x01, 0, {sm64_spawn[0]}, {sm64_spawn[1]}, {sm64_spawn[2]}),\n"
+        if "MARIO_POS" in text:
+            text = re.sub(
+                r'\s*MARIO_POS\s*\(\s*0x01\s*,\s*0\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*\)\s*,\n',
+                spawn_cmd,
+                text,
+            )
+        else:
+            text = spawn_cmd + text
+    dst.write_text(text, encoding="utf-8")
+
 
 
 def _write_level_yaml(dst: Path, level_name: str) -> None:
@@ -152,7 +170,7 @@ def convert(
 
     _write_geo(fast64_dir / "geo.inc.c", out_dir / "geo.c", level_name)
 
-    _write_leveldata(out_dir / "leveldata.c", level_name)
+    _write_leveldata(out_dir / "leveldata.c", level_name), 
 
     _write_script(fast64_dir / "script.c", out_dir / "script.c", sm64_spawn)
 

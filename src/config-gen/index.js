@@ -87,6 +87,7 @@ const fs = require('fs');
         area_id: response.area_id,
         scale_factor: response.scale_factor,
         blender_to_sm64_scale: response.blender_to_sm64_scale,
+        collision_divisor: response.collision_divisor,
         texture_resolution_limit: response.texture_resolution_limit
     };
 
