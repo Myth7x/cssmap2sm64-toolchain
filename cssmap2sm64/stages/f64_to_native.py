@@ -44,8 +44,6 @@ def _write_header(src: Path, dst: Path, level_name: str) -> None:
         f'#include "types.h"\n\n'
         + content
         + f"\nextern const LevelScript level_{level_name}_entry[];\n"
-        + f"\nextern const LevelScript level_{level_name}_entry[];\n"
-        + f"\nextern const LevelScript level_{level_name}_entry[];\n"
         + f"\n#endif\n"
     )
     dst.write_text(out, encoding="utf-8")

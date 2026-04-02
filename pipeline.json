@@ -1,8 +1,9 @@
 {
   "decomp_path": "",
+  "sm64_port_path": "F:\\sm64-port",
   "blender_path": "E:\\SteamLibrary\\steamapps\\common\\Blender\\blender.exe",
   "java_path": "java",
-  "level_name": "bhop_arcane",
+  "level_name": "de_dust2",
   "is_custom_level": true,
   "area_id": 1,
   "scale_factor": 1.0,

@@ -37,3 +37,4 @@ FetchContent_MakeAvailable(stb)
 
 add_subdirectory(src/vmf2obj)
 add_subdirectory(src/vtf2png)
+add_subdirectory(src/bsp2obj)
