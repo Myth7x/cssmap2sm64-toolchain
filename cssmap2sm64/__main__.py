@@ -94,6 +94,7 @@ def main():
     cfg.setdefault("texture_resolution_limit", 512)
     cfg.setdefault("default_background", "ABOVE_CLOUDS")
     cfg.setdefault("sky_map", {})
+    cfg.setdefault("decimate_ratio", 1.0)
 
     bsp = Path(args.bsp).resolve()
     if not bsp.exists():
@@ -193,6 +194,7 @@ def main():
         spawn=spawn_bl,
         materials_json=materials_json,
         background=background,
+        decimate_ratio=cfg["decimate_ratio"],
     )
     level_name = cfg["level_name"]
     print("[4/5] Converting Fast64 output to native sm64-port format...")

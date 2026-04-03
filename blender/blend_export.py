@@ -75,6 +75,7 @@ def main():
     parser.add_argument("--spawn", default="0,0,0")
     parser.add_argument("--materials-json", default=None)
     parser.add_argument("--background-sky", default="ABOVE_CLOUDS")
+    parser.add_argument("--decimate-ratio", type=float, default=1.0)
     args = parser.parse_args(argv)
 
     mat_props = {}
@@ -172,22 +173,51 @@ def main():
     for mat in mat_cache.values():
         mat.collision_type_simple = "SURFACE_DEFAULT"
 
-    bpy.ops.object.select_all(action="DESELECT")
-    split_objects = []
-    for obj in imported:
-        if len(obj.material_slots) <= 1:
-            split_objects.append(obj)
-            continue
-        bpy.context.view_layer.objects.active = obj
-        obj.select_set(True)
-        bpy.ops.object.mode_set(mode="EDIT")
-        bpy.ops.mesh.separate(type="MATERIAL")
-        bpy.ops.object.mode_set(mode="OBJECT")
-        splits = [o for o in bpy.context.selected_objects if o.type == "MESH"]
-        split_objects.extend(splits)
-        bpy.ops.object.select_all(action="DESELECT")
-    imported = split_objects
-    print(f"== blend_export: split into {len(imported)} per-material objects", flush=True)
+    if args.decimate_ratio < 1.0:
+        import math as _dmath
+        import bmesh as _bmesh
+        print(f"== blend_export: decimating with ratio={args.decimate_ratio}", flush=True)
+        surviving = []
+        for obj in imported:
+            before = len(obj.data.polygons)
+            if before == 0:
+                surviving.append(obj)
+                continue
+
+            bpy.context.view_layer.objects.active = obj
+
+            # Pass 1: DISSOLVE — merges coplanar adjacent faces (safe on non-manifold BSP geometry,
+            # never flips normals, never destroys surfaces, collapses tesselated planar quads)
+            mod_d = obj.modifiers.new(name="Dissolve", type="DECIMATE")
+            mod_d.decimate_type = "DISSOLVE"
+            mod_d.angle_limit = _dmath.radians(1.0)
+            bpy.ops.object.modifier_apply(modifier=mod_d.name)
+            after_dissolve = len(obj.data.polygons)
+
+            # Pass 2: COLLAPSE — only if still above ratio target after dissolve
+            target = max(1, int(before * args.decimate_ratio))
+            after = after_dissolve
+            if after_dissolve > target:
+                effective_ratio = max(args.decimate_ratio, 1.0 / after_dissolve)
+                mod_c = obj.modifiers.new(name="Decimate", type="DECIMATE")
+                mod_c.ratio = effective_ratio
+                bpy.ops.object.modifier_apply(modifier=mod_c.name)
+                after = len(obj.data.polygons)
+
+            if after == 0:
+                print(f"  [skip] {obj.name}: {before} -> 0 polys, removing", flush=True)
+                bpy.data.objects.remove(obj, do_unlink=True)
+                continue
+
+            print(
+                f"  {obj.name}: {before} dissolve->{after_dissolve} collapse->{after}"
+                f" ({after/before*100:.0f}%)",
+                flush=True,
+            )
+            surviving.append(obj)
+        imported = surviving
+
+    print(f"== blend_export: {len(imported)} per-material objects (split at OBJ import)", flush=True)
 
     level_root = bpy.data.objects.new("Level Root", None)
     bpy.context.scene.collection.objects.link(level_root)
@@ -256,6 +286,7 @@ def main():
     ce.custom_level_name = args.level_name
     ce.custom_level_path = str(out_dir)
 
+    import math as _math
     import fast64.fast64_internal.f3d.f3d_writer as _f3d_writer
     _orig_getInfoDict = _f3d_writer.getInfoDict
     _orig_saveOrGetF3DMaterial = _f3d_writer.saveOrGetF3DMaterial
@@ -267,7 +298,7 @@ def main():
     )
     _export_t0[0] = _time.monotonic()
     _mat_write_done = [0]
-    _mat_write_t0 = [0.0]
+    _mat_write_t0 = [_time.monotonic()]
     def _getInfoDict_logged(obj):
         _export_done[0] += 1
         obj.data.calc_loop_triangles()
@@ -290,8 +321,17 @@ def main():
         _dn = _mat_write_done[0]
         _el = _time.monotonic() - _mat_write_t0[0]
         _rate = _dn / _el if _el > 0 else 0
+        d = obj.dimensions
+        loc = obj.location
+        rot = obj.rotation_euler
+        nf = len(obj.data.loop_triangles)
         print(
-            f"  Writing material [{_dn} +{_el:.1f}s {_rate:.1f}/s] {material.name}",
+            f"  Writing material [{_dn} +{_el:.1f}s {_rate:.1f}/s] {material.name}"
+            f" | layer={drawLayer}"
+            f" | tris={nf}"
+            f" | dim=({d.x:.1f},{d.y:.1f},{d.z:.1f})"
+            f" | loc=({loc.x:.1f},{loc.y:.1f},{loc.z:.1f})"
+            f" | rot=({_math.degrees(rot.x):.0f},{_math.degrees(rot.y):.0f},{_math.degrees(rot.z):.0f})°",
             flush=True,
         )
         return _orig_saveOrGetF3DMaterial(material, fModel, obj, drawLayer, convertTextureData)
