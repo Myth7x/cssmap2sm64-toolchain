@@ -51,6 +51,8 @@ BSPData load_bsp(const std::string& path) {
     bsp.texdatas  = lump_as<BSPTexData> (data, hdr.lumps[LUMP_TEXDATA]);
     bsp.brushes   = lump_as<BSPBrush>   (data, hdr.lumps[LUMP_BRUSHES]);
     bsp.brushsides = lump_as<BSPBrushSide>(data, hdr.lumps[LUMP_BRUSHSIDES]);
+    bsp.dispinfos  = lump_as<BSPDispInfo> (data, hdr.lumps[LUMP_DISPINFO]);
+    bsp.dispverts  = lump_as<BSPDispVert> (data, hdr.lumps[LUMP_DISP_VERTS]);
 
     {
         const auto& el = hdr.lumps[LUMP_ENTITIES];

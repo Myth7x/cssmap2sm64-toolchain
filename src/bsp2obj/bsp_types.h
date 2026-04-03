@@ -84,6 +84,22 @@ struct BSPBrushSide {
     int16_t bevel;
 };
 
+struct BSPDispInfo {
+    float   startPosition[3];  // 12 bytes
+    int32_t dispVertStart;     //  4 bytes
+    int32_t dispTriStart;      //  4 bytes
+    int32_t power;             //  4 bytes
+    uint8_t _unused[176 - 24]; // pad to 176
+};
+static_assert(sizeof(BSPDispInfo) == 176, "BSPDispInfo size mismatch");
+
+struct BSPDispVert {
+    float vec[3];   // displacement direction
+    float dist;     // displacement magnitude
+    float alpha;    // blend alpha
+};
+static_assert(sizeof(BSPDispVert) == 20, "BSPDispVert size mismatch");
+
 #pragma pack(pop)
 
 static constexpr int LUMP_ENTITIES   = 0;
@@ -97,6 +113,8 @@ static constexpr int LUMP_EDGES      = 12;
 static constexpr int LUMP_SURFEDGES  = 13;
 static constexpr int LUMP_BRUSHES    = 18;
 static constexpr int LUMP_BRUSHSIDES = 19;
+static constexpr int LUMP_DISPINFO   = 26;
+static constexpr int LUMP_DISP_VERTS = 33;
 static constexpr int LUMP_TEXDATA_STRING_TABLE = 44;
 static constexpr int LUMP_TEXDATA_STRING_DATA  = 43;
 
@@ -124,5 +142,7 @@ struct BSPData {
     std::vector<std::string> texnames;
     std::vector<BSPBrush>    brushes;
     std::vector<BSPBrushSide> brushsides;
+    std::vector<BSPDispInfo>  dispinfos;
+    std::vector<BSPDispVert>  dispverts;
     std::string              entities;
 };
