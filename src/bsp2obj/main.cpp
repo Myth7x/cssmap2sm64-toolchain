@@ -213,6 +213,15 @@ static void write_obj(const std::vector<Face>& faces,
         obj << "usemtl " << mat_to_obj_name(f.material) << "\n";
         size_t n = f.verts.size();
         for (size_t t = 1; t < n - 1; ++t) {
+            const auto& A = f.verts[0];
+            const auto& B = f.verts[t];
+            const auto& C = f.verts[t + 1];
+            float bax = B[0]-A[0], bay = B[1]-A[1], baz = B[2]-A[2];
+            float cax = C[0]-A[0], cay = C[1]-A[1], caz = C[2]-A[2];
+            float nx = bay*caz - baz*cay;
+            float ny = baz*cax - bax*caz;
+            float nz = bax*cay - bay*cax;
+            if (nx*nx + ny*ny + nz*nz < 1e-6f) continue;
             obj << "f " << vi       << "/1"
                 << " "  << vi + t   << "/1"
                 << " "  << vi + t+1 << "/1\n";

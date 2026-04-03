@@ -112,6 +112,20 @@ def main():
     imported = [o for o in bpy.context.selected_objects if o.type == "MESH"]
     print(f"== blend_export: imported {len(imported)} mesh objects", flush=True)
 
+    import time as _time
+
+    _all_mat_names = []
+    _seen_names = set()
+    for obj in imported:
+        for slot in obj.material_slots:
+            if slot.material and slot.material.name not in _seen_names:
+                _seen_names.add(slot.material.name)
+                _all_mat_names.append(slot.material.name)
+    _mat_total = len(_all_mat_names)
+    print(f"== blend_export: {_mat_total} unique materials to create", flush=True)
+    _mat_t0 = _time.monotonic()
+    _mat_done = 0
+
     mat_cache = {}
     for obj in imported:
         for slot in obj.material_slots:
@@ -125,7 +139,15 @@ def main():
 
             png_path = find_png_for_material(args.textures, mat_name, mat_props, underscore_to_slash)
             preset = "Shaded Texture" if png_path else "Shaded Solid"
-            print(f"== blend_export: createF3DMat for {mat_name!r} preset={preset}", flush=True)
+            _mat_done += 1
+            _elapsed = _time.monotonic() - _mat_t0
+            _pct = _mat_done / _mat_total * 100 if _mat_total else 100
+            _eta = (_elapsed / _mat_done * (_mat_total - _mat_done)) if _mat_done else 0
+            print(
+                f"== blend_export: mat [{_mat_done}/{_mat_total} {_pct:.0f}%"
+                f" +{_elapsed:.1f}s eta {_eta:.0f}s] {mat_name!r} preset={preset}",
+                flush=True,
+            )
 
             new_mat = createF3DMat(None, preset)
             new_mat.name = mat_name
@@ -236,27 +258,52 @@ def main():
 
     import fast64.fast64_internal.f3d.f3d_writer as _f3d_writer
     _orig_getInfoDict = _f3d_writer.getInfoDict
+    _orig_saveOrGetF3DMaterial = _f3d_writer.saveOrGetF3DMaterial
     _export_total = [0]
     _export_done = [0]
+    _export_t0 = [0.0]
     _export_total[0] = sum(
         1 for o in bpy.data.objects if o.type == "MESH" and o.visible_get()
     )
+    _export_t0[0] = _time.monotonic()
+    _mat_write_done = [0]
+    _mat_write_t0 = [0.0]
     def _getInfoDict_logged(obj):
         _export_done[0] += 1
         obj.data.calc_loop_triangles()
         nf = len(obj.data.loop_triangles)
+        _el = _time.monotonic() - _export_t0[0]
+        _tot = _export_total[0]
+        _dn = _export_done[0]
+        _pct = _dn / _tot * 100 if _tot else 100
+        _eta = (_el / _dn * (_tot - _dn)) if _dn else 0
         print(
-            f"== f3d export [{_export_done[0]}/{_export_total[0]}] {obj.name} ({nf} tris)",
+            f"== f3d export [{_dn}/{_tot} {_pct:.0f}% +{_el:.1f}s eta {_eta:.0f}s]"
+            f" {obj.name} ({nf} tris)",
             flush=True,
         )
+        _mat_write_done[0] = 0
+        _mat_write_t0[0] = _time.monotonic()
         return _orig_getInfoDict(obj)
+    def _saveOrGetF3DMaterial_logged(material, fModel, obj, drawLayer, convertTextureData):
+        _mat_write_done[0] += 1
+        _dn = _mat_write_done[0]
+        _el = _time.monotonic() - _mat_write_t0[0]
+        _rate = _dn / _el if _el > 0 else 0
+        print(
+            f"  Writing material [{_dn} +{_el:.1f}s {_rate:.1f}/s] {material.name}",
+            flush=True,
+        )
+        return _orig_saveOrGetF3DMaterial(material, fModel, obj, drawLayer, convertTextureData)
     _f3d_writer.getInfoDict = _getInfoDict_logged
+    _f3d_writer.saveOrGetF3DMaterial = _saveOrGetF3DMaterial_logged
 
     bpy.context.view_layer.objects.active = level_root
     level_root.select_set(True)
     print("== blend_export: calling sm64_export_level", flush=True)
     bpy.ops.object.sm64_export_level()
     _f3d_writer.getInfoDict = _orig_getInfoDict
+    _f3d_writer.saveOrGetF3DMaterial = _orig_saveOrGetF3DMaterial
     print("== blend_export: done", flush=True)
 
 
