@@ -12,14 +12,13 @@ The pipeline extracts geometry, processes it through Blender, and exports it usi
 ## Setup
 
 1. Download `bspsource.jar` and place it in the `vendor/` directory.
-
-2. Build the project:
+2. Download 'Fast64' and place it in the `vendor/` directory.
+3. Install Blender and ensure it's added to your system PATH.
+4. Build the project:
 cmake -B build
 cmake --build build
-
-3. Generate pipeline configuration:
+5. Generate pipeline configuration:
 node src/config-gen/index.js
-
 This creates `pipeline.json`.
 
 ---
@@ -58,13 +57,3 @@ python -m cssmap2sm64 yourmap.bsp
 
 ### 5. (Optional) Convert to compatible native map format
 - Using custom module f64_to_native
-
----
-
-## Notes
-
-- Some geometry may require manual cleanup after import.
-- Source maps often contain non-manifold or unnecessary geometry.
-- Scale mismatches are common; verify dimensions before export.
-- Props and models may need separate extraction and handling.
-
