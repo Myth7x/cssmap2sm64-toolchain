@@ -21,8 +21,15 @@ def extract_pak(bsp_path, out_dir):
     zf = zipfile.ZipFile(io.BytesIO(pak_data))
     zf.extractall(out_dir)
 
-    return [
+    names = zf.namelist()
+    vtf_paths = [
         str(Path(out_dir) / name)
-        for name in zf.namelist()
+        for name in names
         if name.lower().endswith(".vtf")
     ]
+    vmt_paths = [
+        str(Path(out_dir) / name)
+        for name in names
+        if name.lower().endswith(".vmt")
+    ]
+    return vtf_paths, vmt_paths

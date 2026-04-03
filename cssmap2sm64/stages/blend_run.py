@@ -4,7 +4,7 @@ from pathlib import Path
 _SCRIPT = Path(__file__).parent.parent.parent / "blender" / "blend_export.py"
 
 
-def run(blender, obj_path, textures_dir, output_dir, level_name, area_id, scale, spawn=(0.0, 0.0, 0.0)):
+def run(blender, obj_path, textures_dir, output_dir, level_name, area_id, scale, spawn=(0.0, 0.0, 0.0), materials_json=None):
     cmd = [
         blender,
         "--background",
@@ -18,4 +18,6 @@ def run(blender, obj_path, textures_dir, output_dir, level_name, area_id, scale,
         "--scale", str(scale),
         f"--spawn={spawn[0]},{spawn[1]},{spawn[2]}",
     ]
+    if materials_json is not None:
+        cmd += ["--materials-json", str(materials_json)]
     subprocess.run(cmd, check=True)

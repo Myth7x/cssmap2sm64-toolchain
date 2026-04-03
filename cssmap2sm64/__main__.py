@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from .cli import build_parser
-from .stages import unpack_pak, blend_run, f64_to_native
+from .stages import unpack_pak, blend_run, f64_to_native, parse_vmt
 
 _ROOT = Path(__file__).parent.parent
 _VENDOR = _ROOT / "vendor"
@@ -63,7 +63,9 @@ def main():
     obj_path    = out / (bsp.stem + ".obj")
     spawn_file  = out / (bsp.stem + ".spawn")
     tex_dir     = out / "textures"
-    tex_dir.mkdir(exist_ok=True)
+    if tex_dir.exists():
+        shutil.rmtree(tex_dir)
+    tex_dir.mkdir()
 
     print("[1/4] Converting BSP to OBJ...")
     bsp2obj_cmd = [
@@ -96,10 +98,16 @@ def main():
             print("  [warn] No spawn entity found, using origin (0, 0, 0)")
 
     print("[2/4] Extracting PAK textures...")
-    vtf_files = unpack_pak.extract_pak(str(bsp), str(tex_dir))
+    vtf_files, vmt_files = unpack_pak.extract_pak(str(bsp), str(tex_dir))
+    max_size = str(cfg["texture_resolution_limit"])
     for vtf in vtf_files:
         png = str(Path(vtf).with_suffix(".png"))
-        subprocess.run([str(vtf2png_bin), vtf, png], check=True)
+        subprocess.run([str(vtf2png_bin), vtf, png, max_size], check=True)
+    materials_json = None
+    if vmt_files:
+        print(f"  Parsing {len(vmt_files)} VMT material files...")
+        parse_vmt.parse_vmts(vmt_files, tex_dir)
+        materials_json = tex_dir / "materials.json"
 
     if args.no_blend:
         print(f"[3/5] Skipped (--no-blend). OBJ: {obj_path}")
@@ -117,6 +125,7 @@ def main():
         area_id=cfg["area_id"],
         scale=cfg["blender_to_sm64_scale"],
         spawn=spawn_bl,
+        materials_json=materials_json,
     )
     level_name = cfg["level_name"]
     print("[4/5] Converting Fast64 output to native sm64-port format...")

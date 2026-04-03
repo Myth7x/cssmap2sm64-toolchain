@@ -108,10 +108,7 @@ static void write_obj(const std::vector<Face>& faces,
     for (const auto& f : faces) {
         std::string n = mat_to_obj_name(f.material);
         if (seen.insert(n).second) {
-            std::string mat_lower = f.material;
-            for (char& c : mat_lower) c = (char)std::tolower((unsigned char)c);
-            mtl << "newmtl " << n << "\n";
-            mtl << "map_Kd textures/materials/" << mat_lower << ".png\n\n";
+            mtl << "newmtl " << n << "\n\n";
         }
     }
 
@@ -132,8 +129,8 @@ static void write_obj(const std::vector<Face>& faces,
         size_t n = f.verts.size();
         for (size_t t = 1; t < n - 1; ++t) {
             obj << "f " << vi       << "/1"
-                << " "  << vi + t   << "/1"
-                << " "  << vi + t+1 << "/1\n";
+                << " "  << vi + t+1 << "/1"
+                << " "  << vi + t   << "/1\n";
         }
         vi += n;
     }
