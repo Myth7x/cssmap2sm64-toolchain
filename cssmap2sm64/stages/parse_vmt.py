@@ -40,6 +40,21 @@ def _material_key(vmt_path, textures_dir):
     return key.lower()
 
 
+def _basetexture_from_kv(kv):
+    bt = kv.get("$basetexture") or None
+    if bt:
+        return bt.replace("\\", "/").lower()
+    include = kv.get("include", "")
+    if include:
+        inc = include.lower().replace("\\", "/")
+        if inc.startswith("materials/"):
+            inc = inc[len("materials/"):]
+        if inc.endswith(".vmt"):
+            inc = inc[:-4]
+        return inc
+    return None
+
+
 def parse_vmts(vmt_paths, textures_dir):
     textures_dir = Path(textures_dir)
     materials = {}
@@ -50,13 +65,27 @@ def parse_vmts(vmt_paths, textures_dir):
             continue
         kv = _parse_vmt(text)
         key = _material_key(vmt_path, textures_dir)
-        basetexture = kv.get("$basetexture") or None
-        if basetexture:
-            basetexture = basetexture.replace("\\", "/").lower()
         materials[key] = {
-            "basetexture": basetexture,
+            "basetexture": _basetexture_from_kv(kv),
             "alpha_mode": _alpha_mode(kv),
         }
     out = textures_dir / "materials.json"
     out.write_text(json.dumps(materials, indent=2), encoding="utf-8")
     return materials
+
+
+def collect_base_slugs(tex_dir):
+    slugs = set()
+    mat_dir = Path(tex_dir) / "materials"
+    if not mat_dir.is_dir():
+        return slugs
+    for vmt_path in mat_dir.rglob("*.vmt"):
+        try:
+            text = vmt_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        kv = _parse_vmt(text)
+        bt = _basetexture_from_kv(kv)
+        if bt:
+            slugs.add(bt.replace("/", "_").replace("\\", "_"))
+    return slugs

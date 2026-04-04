@@ -1,3 +1,5 @@
+import json
+import math
 import re
 import shutil
 from pathlib import Path
@@ -56,12 +58,36 @@ def _write_geo(src_inc: Path, dst: Path, level_name: str) -> None:
     dst.write_text(content, encoding="utf-8")
 
 
-def _write_leveldata(dst: Path, level_name: str) -> None:
+_VTX_RE = re.compile(
+    r'(\{\{\s*'
+    r'\{\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*\}\s*,'
+    r'\s*\d+\s*,)'
+    r'(\s*\{\s*)(-?\d+)(\s*,\s*)(-?\d+)(\s*\}\s*,)'
+    r'(\s*\{\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*\}\s*\}\})'
+)
+
+
+def _wrap_s16(v: int) -> int:
+    return ((v + 32768) % 65536) - 32768
+
+
+def _fix_model_uvs(src: Path, dst: Path) -> None:
+    text = src.read_text(encoding='utf-8')
+    def _repl(m: re.Match) -> str:
+        u = _wrap_s16(int(m.group(3)))
+        v = _wrap_s16(int(m.group(5)))
+        return m.group(1) + m.group(2) + str(u) + m.group(4) + str(v) + m.group(6) + m.group(7)
+    dst.write_text(_VTX_RE.sub(_repl, text), encoding='utf-8')
+
+
+def _write_leveldata(dst: Path, level_name: str, has_lighting: bool = False) -> None:
     content = _LEVELDATA_BOILERPLATE
     content += f'#include "levels/{level_name}/texture.inc.c"\n'
     content += f'#include "levels/{level_name}/areas/1/1/model.inc.c"\n'
     content += f'#include "levels/{level_name}/areas/1/collision.inc.c"\n'
     content += f'#include "levels/{level_name}/areas/1/macro.inc.c"\n'
+    if has_lighting:
+        content += f'#include "levels/{level_name}/level_lighting.inc.c"\n'
     dst.write_text(content, encoding="utf-8")
 
 
@@ -115,6 +141,26 @@ def _write_script(
 
 
 
+def _write_level_lighting(dst: Path, env: dict) -> None:
+    pitch = env.get("sun_pitch", -45.0)
+    yaw_deg = env.get("sun_yaw", 0.0)
+    elev = math.radians(-pitch)
+    yaw_r = math.radians(yaw_deg)
+    dx = math.cos(elev) * math.cos(yaw_r)
+    dy = math.sin(elev)
+    dz = -math.cos(elev) * math.sin(yaw_r)
+    ar, ag, ab = env.get("ambient_color", [0.3, 0.3, 0.3])
+    sr, sg, sb = env.get("sun_color", [1.0, 1.0, 1.0])
+    lines = [
+        '#include "src/pc/gfx/level_lights.h"',
+        f'static void level_apply_bsp_lighting(void) {{',
+        f'    level_lights_set_ambient({ar:.6f}f, {ag:.6f}f, {ab:.6f}f, 1.0f);',
+        f'    level_lights_set_sun({dx:.6f}f, {dy:.6f}f, {dz:.6f}f, {sr:.6f}f, {sg:.6f}f, {sb:.6f}f);',
+        '}',
+    ]
+    dst.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
 def _write_level_yaml(dst: Path, level_name: str, skybox_bin: str = "water") -> None:
     content = (
         f"short-name: {level_name}\n"
@@ -139,6 +185,7 @@ def convert(
     collision_divisor: int = 150,
     sm64_spawn: Optional[Tuple[int, int, int]] = None,
     skybox_bin: str = "water",
+    env_json: Optional[Path] = None,
 ) -> None:
     fast64_dir = Path(fast64_dir)
     out_dir = Path(out_dir)
@@ -159,7 +206,7 @@ def convert(
     for fname in ("geo.inc.c", "macro.inc.c"):
         shutil.copy2(fast64_dir / "area_1" / fname, areas1 / fname)
 
-    shutil.copy2(fast64_dir / "model.inc.c", areas1 / "1" / "model.inc.c")
+    _fix_model_uvs(fast64_dir / "model.inc.c", areas1 / "1" / "model.inc.c")
 
     _write_header(
         fast64_dir / "header.inc.h",
@@ -169,7 +216,15 @@ def convert(
 
     _write_geo(fast64_dir / "geo.inc.c", out_dir / "geo.c", level_name)
 
-    _write_leveldata(out_dir / "leveldata.c", level_name), 
+    env = None
+    if env_json is not None:
+        env_path = Path(env_json)
+        if env_path.exists():
+            with open(env_path, encoding="utf-8") as _f:
+                env = json.load(_f)
+            _write_level_lighting(out_dir / "level_lighting.inc.c", env)
+
+    _write_leveldata(out_dir / "leveldata.c", level_name, has_lighting=(env is not None)) 
 
     _write_script(fast64_dir / "script.c", out_dir / "script.c", sm64_spawn)
 

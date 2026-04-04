@@ -49,35 +49,59 @@ try:
     import math
     import bmesh
 
+    # Helper: count boundary (open) edges — a hole-free mesh has 0 on a closed surface,
+    # or only perimeter edges on a flat surface (shared count=1). Check no edge has count=0.
+    def count_boundary_edges(obj):
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        bm.edges.ensure_lookup_table()
+        boundary = sum(1 for e in bm.edges if len(e.link_faces) < 2)
+        bm.free()
+        return boundary
+
+    # BSP-like non-manifold mesh: 4x4 grid of CONNECTED coplanar quads but emitted as
+    # fully independent quads (no shared vertices), exactly like bsp2obj output
     mesh2 = bpy.data.meshes.new("DecimTest")
     dec_obj = bpy.data.objects.new("DecimTest", mesh2)
     bpy.context.scene.collection.objects.link(dec_obj)
     bpy.context.view_layer.objects.active = dec_obj
 
     bm = bmesh.new()
-    # Build 6 disconnected quads (like per-material BSP faces) facing different directions
-    offsets = [(0,0,0),(5,0,0),(10,0,0),(0,5,0),(0,10,0),(0,0,5)]
-    for ox, oy, oz in offsets:
-        v0 = bm.verts.new((ox+0, oy+0, oz+0))
-        v1 = bm.verts.new((ox+1, oy+0, oz+0))
-        v2 = bm.verts.new((ox+1, oy+1, oz+0))
-        v3 = bm.verts.new((ox+0, oy+1, oz+0))
-        bm.faces.new((v0, v1, v2, v3))
+    # 4x4 grid of independent unit quads (co-located edges, but NO shared vertices — like bsp2obj)
+    for row in range(4):
+        for col in range(4):
+            ox, oy = float(col), float(row)
+            v0 = bm.verts.new((ox,   oy,   0))
+            v1 = bm.verts.new((ox+1, oy,   0))
+            v2 = bm.verts.new((ox+1, oy+1, 0))
+            v3 = bm.verts.new((ox,   oy+1, 0))
+            bm.faces.new((v0, v1, v2, v3))
     bm.to_mesh(mesh2)
     bm.free()
     mesh2.update()
 
     before = len(dec_obj.data.polygons)
-    normals_before = [tuple(round(x,3) for x in p.normal) for p in dec_obj.data.polygons]
+    boundary_before = count_boundary_edges(dec_obj)
+    print(f"  BSP-like grid: before={before} polys, boundary_edges_before={boundary_before}")
 
-    # Pass 1: DISSOLVE
+    _bm = bmesh.new()
+    _bm.from_mesh(dec_obj.data)
+    bmesh.ops.remove_doubles(_bm, verts=_bm.verts, dist=0.01)
+    _bm.to_mesh(dec_obj.data)
+    _bm.free()
+    dec_obj.data.update()
+    after_merge = len(dec_obj.data.polygons)
+    boundary_merged = count_boundary_edges(dec_obj)
+    print(f"  After merge_by_distance: polys={after_merge}, boundary_edges={boundary_merged}")
+
     mod_d = dec_obj.modifiers.new(name="Dissolve", type="DECIMATE")
     mod_d.decimate_type = "DISSOLVE"
     mod_d.angle_limit = math.radians(1.0)
     bpy.ops.object.modifier_apply(modifier=mod_d.name)
     after_dissolve = len(dec_obj.data.polygons)
+    boundary_dissolve = count_boundary_edges(dec_obj)
+    print(f"  After dissolve: polys={after_dissolve}, boundary_edges={boundary_dissolve}")
 
-    # Pass 2: COLLAPSE
     target = max(1, int(before * 0.1))
     after = after_dissolve
     if after_dissolve > target:
@@ -87,15 +111,16 @@ try:
         bpy.ops.object.modifier_apply(modifier=mod_c.name)
         after = len(dec_obj.data.polygons)
 
-    normals_after = [tuple(round(x,3) for x in p.normal) for p in dec_obj.data.polygons]
+    boundary_after = count_boundary_edges(dec_obj)
+    print(f"  After collapse: polys={after}, boundary_edges={boundary_after}")
 
-    print(f"  Disconnected quads: before={before} dissolve={after_dissolve} collapse={after}")
     assert after >= 1, f"All faces removed! Expected >= 1, got {after}"
-    for n in normals_after:
-        assert n[2] > 0.9, f"Normal {n} not pointing up (+Z) — winding flipped!"
-    print("  Face count OK, normals preserved")
+    assert boundary_after == boundary_dissolve, (
+        f"Collapse INTRODUCED holes: boundary edges {boundary_dissolve} -> {boundary_after}"
+    )
+    print("  No holes introduced by collapse — OK")
 
-    # Test a connected manifold mesh (solid box)
+    # Reconnected manifold mesh (solid box)
     mesh3 = bpy.data.meshes.new("DecimManifold")
     mobj = bpy.data.objects.new("DecimManifold", mesh3)
     bpy.context.scene.collection.objects.link(mobj)
@@ -107,6 +132,12 @@ try:
     mesh3.update()
 
     before2 = len(mobj.data.polygons)
+    _bm2 = bmesh.new()
+    _bm2.from_mesh(mobj.data)
+    bmesh.ops.remove_doubles(_bm2, verts=_bm2.verts, dist=0.01)
+    _bm2.to_mesh(mobj.data)
+    _bm2.free()
+    mobj.data.update()
     mod_d2 = mobj.modifiers.new(name="Dissolve", type="DECIMATE")
     mod_d2.decimate_type = "DISSOLVE"
     mod_d2.angle_limit = math.radians(1.0)

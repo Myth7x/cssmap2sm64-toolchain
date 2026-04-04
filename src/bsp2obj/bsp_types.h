@@ -117,6 +117,9 @@ static constexpr int LUMP_DISPINFO   = 26;
 static constexpr int LUMP_DISP_VERTS = 33;
 static constexpr int LUMP_TEXDATA_STRING_TABLE = 44;
 static constexpr int LUMP_TEXDATA_STRING_DATA  = 43;
+static constexpr int LUMP_GAME_LUMP            = 35;
+
+static constexpr uint32_t GAMELUMP_SPRP = 0x73707270u;
 
 static constexpr int CONTENTS_SOLID     = 0x1;
 static constexpr int CONTENTS_WINDOW    = 0x2;
@@ -130,6 +133,13 @@ static constexpr int SURF_HINT         = 0x100;
 static constexpr int SURF_SKIP         = 0x200;
 static constexpr int SURF_TRIGGER      = 0x40;
 static constexpr int SURF_NOLIGHT      = 0x400;
+
+struct StaticProp {
+    float       origin[3];
+    float       angles[3];
+    std::string model;
+    int         skin;
+};
 
 struct BSPData {
     std::vector<BSPPlane>    planes;
@@ -145,4 +155,5 @@ struct BSPData {
     std::vector<BSPDispInfo>  dispinfos;
     std::vector<BSPDispVert>  dispverts;
     std::string              entities;
+    std::vector<StaticProp>  static_props;
 };

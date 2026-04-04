@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 import struct
@@ -7,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .cli import build_parser
-from .stages import unpack_pak, blend_run, f64_to_native, parse_vmt
+from .stages import unpack_pak, blend_run, f64_to_native, parse_vmt, extract_vpk, read_bsp_env
 
 _BG_SEGMENT = {
     "OCEAN_SKY": "water",
@@ -118,6 +119,7 @@ def main():
 
     obj_path    = out / (bsp.stem + ".obj")
     spawn_file  = out / (bsp.stem + ".spawn")
+    props_file  = out / (bsp.stem + ".props.json")
     tex_dir     = out / "textures"
     if tex_dir.exists():
         shutil.rmtree(tex_dir)
@@ -128,6 +130,7 @@ def main():
         str(bsp2obj_bin), str(bsp), str(obj_path),
         "--scale", str(cfg["scale_factor"]),
         "--spawn-out", str(spawn_file),
+        "--props-out", str(props_file),
     ]
     if args.keep_tools:
         bsp2obj_cmd.append("--keep-tools")
@@ -137,6 +140,21 @@ def main():
     background = _skyname_to_background(skyname, cfg["sky_map"], cfg["default_background"])
     skybox_bin = _BG_SEGMENT.get(background, "water")
     print(f"  Sky: {skyname!r} -> background={background} skybox-bin={skybox_bin}")
+
+    env_data = read_bsp_env.read_env(str(bsp))
+    env_json_path = None
+    if env_data:
+        import json as _env_json_mod
+        env_json_path = out / (bsp.stem + ".env.json")
+        env_json_path.write_text(_env_json_mod.dumps(env_data, indent=2), encoding="utf-8")
+        sc, ac = env_data["sun_color"], env_data["ambient_color"]
+        print(
+            f"  Env: sun=({sc[0]:.2f},{sc[1]:.2f},{sc[2]:.2f})"
+            f" amb=({ac[0]:.2f},{ac[1]:.2f},{ac[2]:.2f})"
+            f" pitch={env_data['sun_pitch']:.0f}° yaw={env_data['sun_yaw']:.0f}°"
+        )
+    else:
+        print("  Env: no light_environment found, using default lighting")
 
     spawn_bl  = (0.0, 0.0, 0.0)
     sm64_spawn = (0, 0, 0)
@@ -160,6 +178,28 @@ def main():
 
     print("[2/4] Extracting PAK textures...")
     vtf_files, vmt_files = unpack_pak.extract_pak(str(bsp), str(tex_dir))
+
+    game_path = cfg.get("game_path", "")
+    if game_path and Path(game_path).is_dir():
+        mat_slugs = set()
+        if obj_path.exists():
+            for line in obj_path.read_text(errors="replace").splitlines():
+                if line.startswith("usemtl "):
+                    mat_slugs.add(line[7:].strip().lower())
+        mat_dir = str(tex_dir / "materials")
+        already = set()
+        for p in vtf_files:
+            try:
+                rel = os.path.relpath(p, mat_dir).replace("\\", "/")
+                already.add(rel.rsplit(".", 1)[0].lower().replace("/", "_"))
+            except ValueError:
+                pass
+        needed = {s for s in mat_slugs if s not in already}
+        needed.update(parse_vmt.collect_base_slugs(str(tex_dir)) - already)
+        if needed:
+            extra_vtfs = extract_vpk.extract_materials_from_vpk(game_path, needed, str(tex_dir))
+            vtf_files = vtf_files + extra_vtfs
+
     _res = cfg["texture_resolution_limit"]
     max_size = "0" if _res == "auto" else str(int(_res))
     if vtf_files:
@@ -171,9 +211,11 @@ def main():
                 lf.write(str(Path(vtf).with_suffix(".png")) + "\n")
         subprocess.run([str(vtf2png_bin), "@", str(list_file)], check=True)
     materials_json = None
-    if vmt_files:
-        print(f"  Parsing {len(vmt_files)} VMT material files...")
-        parse_vmt.parse_vmts(vmt_files, tex_dir)
+    mat_dir_path = tex_dir / "materials"
+    all_vmts = list(mat_dir_path.rglob("*.vmt")) if mat_dir_path.is_dir() else []
+    if all_vmts:
+        print(f"  Parsing {len(all_vmts)} VMT material files...")
+        parse_vmt.parse_vmts([str(p) for p in all_vmts], tex_dir)
         materials_json = tex_dir / "materials.json"
 
     if args.no_blend:
@@ -195,6 +237,9 @@ def main():
         materials_json=materials_json,
         background=background,
         decimate_ratio=cfg["decimate_ratio"],
+        props_json=props_file if props_file.exists() else None,
+        bsp_scale=cfg["scale_factor"],
+        env_json=env_json_path,
     )
     level_name = cfg["level_name"]
     print("[4/5] Converting Fast64 output to native sm64-port format...")
@@ -206,6 +251,7 @@ def main():
         collision_divisor=cfg["collision_divisor"],
         sm64_spawn=sm64_spawn,
         skybox_bin=skybox_bin,
+        env_json=env_json_path,
     )
 
     sm64_port_path = cfg.get("sm64_port_path", "")

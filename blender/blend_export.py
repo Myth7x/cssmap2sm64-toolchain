@@ -5,6 +5,26 @@ import sys
 from pathlib import Path
 
 
+_png_slug_cache: dict = {}
+
+
+def _png_index(textures_dir):
+    td = str(Path(textures_dir).resolve())
+    if td not in _png_slug_cache:
+        idx = {}
+        mat_dir = os.path.join(td, "materials")
+        if os.path.isdir(mat_dir):
+            for root, _, files in os.walk(mat_dir):
+                for fname in files:
+                    if fname.lower().endswith(".png"):
+                        full = os.path.join(root, fname)
+                        rel = os.path.relpath(full, mat_dir).replace("\\", "/")
+                        slug = rel[:-4].lower().replace("/", "_")
+                        idx[slug] = full
+        _png_slug_cache[td] = idx
+    return _png_slug_cache[td]
+
+
 def find_png(textures_dir, material_name):
     tex_dir = Path(textures_dir)
 
@@ -17,11 +37,10 @@ def find_png(textures_dir, material_name):
     if flat.exists():
         return str(flat)
 
-    stem = Path(material_name).name.lower() + ".png"
-    for root, _, files in os.walk(str(tex_dir)):
-        for fname in files:
-            if fname.lower() == stem:
-                return str(Path(root) / fname)
+    slug = material_name.lower().replace("\\", "_").replace("/", "_")
+    idx = _png_index(textures_dir)
+    if slug in idx:
+        return idx[slug]
 
     return None
 
@@ -76,6 +95,9 @@ def main():
     parser.add_argument("--materials-json", default=None)
     parser.add_argument("--background-sky", default="ABOVE_CLOUDS")
     parser.add_argument("--decimate-ratio", type=float, default=1.0)
+    parser.add_argument("--props-json", default=None)
+    parser.add_argument("--bsp-scale", type=float, default=1.0)
+    parser.add_argument("--env-json", default=None)
     args = parser.parse_args(argv)
 
     mat_props = {}
@@ -101,16 +123,58 @@ def main():
 
     print("== blend_export: color management set", flush=True)
 
+    _env = {}
+    _sun_light_data = None
+    _sun_light_obj = None
+    if args.env_json and Path(args.env_json).exists():
+        with open(args.env_json, encoding="utf-8") as _ef:
+            _env = json.load(_ef)
+        import math as _lmath
+        import mathutils as _lmu
+
+        _sr, _sg, _sb = _env["sun_color"]
+        _sun_light_data = bpy.data.lights.new("_bsp_sun", "SUN")
+        _sun_light_data.color = (_sr, _sg, _sb)
+        _sun_light_obj = bpy.data.objects.new("_bsp_sun", _sun_light_data)
+        bpy.context.scene.collection.objects.link(_sun_light_obj)
+
+        _elev = _lmath.radians(-_env["sun_pitch"])
+        _yaw_r = _lmath.radians(_env["sun_yaw"])
+        _tx = _lmath.cos(_elev) * _lmath.cos(_yaw_r)
+        _ty = _lmath.cos(_elev) * _lmath.sin(_yaw_r)
+        _tz = _lmath.sin(_elev)
+        _mag = _lmath.sqrt(_tx * _tx + _ty * _ty + _tz * _tz)
+        if _mag > 1e-6:
+            _tx, _ty, _tz = _tx / _mag, _ty / _mag, _tz / _mag
+        else:
+            _tx, _ty, _tz = 0.0, 1.0, 0.0
+        _from = _lmu.Vector((0.0, 0.0, 1.0))
+        _to = _lmu.Vector((_tx, -_tz, _ty)).normalized()
+        _sun_light_obj.rotation_mode = "QUATERNION"
+        _sun_light_obj.rotation_quaternion = _from.rotation_difference(_to)
+        _ar, _ag, _ab = _env["ambient_color"]
+        print(
+            f"== blend_export: env sun=({_sr:.2f},{_sg:.2f},{_sb:.2f})"
+            f" dir=({_tx:.3f},{_ty:.3f},{_tz:.3f})"
+            f" amb=({_ar:.2f},{_ag:.2f},{_ab:.2f})",
+            flush=True,
+        )
+    else:
+        print("== blend_export: no env data, using default lighting", flush=True)
+
     bpy.ops.object.select_all(action="DESELECT")
     print("== blend_export: importing OBJ", flush=True)
 
+    _before_import = set(bpy.data.objects)
     blender_ver = bpy.app.version
     if blender_ver >= (3, 3, 0):
-        bpy.ops.wm.obj_import(filepath=args.obj)
+        bpy.ops.wm.obj_import(filepath=args.obj, forward_axis='NEGATIVE_Z', up_axis='Y')
     else:
-        bpy.ops.import_scene.obj(filepath=args.obj)
+        bpy.ops.import_scene.obj(filepath=args.obj, axis_forward='-Z', axis_up='Y')
 
-    imported = [o for o in bpy.context.selected_objects if o.type == "MESH"]
+    imported = [o for o in bpy.data.objects if o not in _before_import and o.type == "MESH"]
+    if not imported:
+        imported = [o for o in bpy.context.selected_objects if o.type == "MESH"]
     print(f"== blend_export: imported {len(imported)} mesh objects", flush=True)
 
     import time as _time
@@ -153,11 +217,31 @@ def main():
             new_mat = createF3DMat(None, preset)
             new_mat.name = mat_name
 
+            if _env and _sun_light_data is not None:
+                _amb_r, _amb_g, _amb_b = _env["ambient_color"]
+                new_mat.f3d_mat.use_default_lighting = False
+                new_mat.f3d_mat.set_ambient_from_light = False
+                new_mat.f3d_mat.ambient_light_color = (_amb_r, _amb_g, _amb_b, 1.0)
+                new_mat.f3d_mat.f3d_light1 = _sun_light_data
+
             if png_path:
                 img = bpy.data.images.load(png_path, check_existing=True)
                 new_mat.f3d_mat.tex0.tex_set = True
                 new_mat.f3d_mat.tex0.tex = img
                 new_mat.f3d_mat.tex0.tex_format = "RGBA16"
+                _iw, _ih = int(img.size[0]), int(img.size[1])
+                if _iw > 0 and _ih > 0 and new_mat.f3d_mat.tex0.autoprop:
+                    import math as _imath
+                    def _log2up(n):
+                        return max(1, int(_imath.ceil(_imath.log2(n))))
+                    new_mat.f3d_mat.tex0.S.mask = _log2up(_iw)
+                    new_mat.f3d_mat.tex0.S.shift = 0
+                    new_mat.f3d_mat.tex0.S.low = 0.0
+                    new_mat.f3d_mat.tex0.S.high = float(_iw - 1)
+                    new_mat.f3d_mat.tex0.T.mask = _log2up(_ih)
+                    new_mat.f3d_mat.tex0.T.shift = 0
+                    new_mat.f3d_mat.tex0.T.low = 0.0
+                    new_mat.f3d_mat.tex0.T.high = float(_ih - 1)
             else:
                 print(f"== blend_export: [warn] no texture found for {mat_name!r}", flush=True)
 
@@ -186,15 +270,25 @@ def main():
 
             bpy.context.view_layer.objects.active = obj
 
-            # Pass 1: DISSOLVE — merges coplanar adjacent faces (safe on non-manifold BSP geometry,
-            # never flips normals, never destroys surfaces, collapses tesselated planar quads)
+            # Fuse co-located vertices: bsp2obj emits every face with independent verts
+            # (no sharing), so the mesh is entirely non-manifold. remove_doubles
+            # reconnects shared edge vertices, making DISSOLVE/COLLAPSE hole-free.
+            _bm = _bmesh.new()
+            _bm.from_mesh(obj.data)
+            _bmesh.ops.remove_doubles(_bm, verts=_bm.verts, dist=0.01)
+            _bm.to_mesh(obj.data)
+            _bm.free()
+            obj.data.update()
+            after_merge = len(obj.data.polygons)
+
+            # Pass 1: DISSOLVE — merges coplanar adjacent faces (now has shared edges)
             mod_d = obj.modifiers.new(name="Dissolve", type="DECIMATE")
             mod_d.decimate_type = "DISSOLVE"
             mod_d.angle_limit = _dmath.radians(1.0)
             bpy.ops.object.modifier_apply(modifier=mod_d.name)
             after_dissolve = len(obj.data.polygons)
 
-            # Pass 2: COLLAPSE — only if still above ratio target after dissolve
+            # Pass 2: COLLAPSE — safe now that mesh is manifold (no T-junction holes)
             target = max(1, int(before * args.decimate_ratio))
             after = after_dissolve
             if after_dissolve > target:
@@ -210,7 +304,7 @@ def main():
                 continue
 
             print(
-                f"  {obj.name}: {before} dissolve->{after_dissolve} collapse->{after}"
+                f"  {obj.name}: {before} merge->{after_merge} dissolve->{after_dissolve} collapse->{after}"
                 f" ({after/before*100:.0f}%)",
                 flush=True,
             )
@@ -273,6 +367,31 @@ def main():
     mario_start.location = (spawn_parts[0], spawn_parts[1], spawn_parts[2])
     mario_start.parent = area_root
     print(f"== blend_export: Mario Start at {mario_start.location[:]}", flush=True)
+
+    if args.props_json and Path(args.props_json).exists():
+        import math as _pmath
+        with open(args.props_json) as _pf:
+            _props = json.load(_pf)
+        _s = args.bsp_scale
+        for _i, _prop in enumerate(_props):
+            _ox, _oy, _oz = _prop["origin"]
+            _pa, _py, _pr = _prop["angles"]
+            _mdl = _prop.get("model", "")
+            _name = f"prop_{_i:04d}"
+            _empty = bpy.data.objects.new(_name, None)
+            _empty.empty_display_type = "CUBE"
+            _empty.empty_display_size = 16.0
+            bpy.context.scene.collection.objects.link(_empty)
+            _empty.location = (_ox * _s, _oy * _s, _oz * _s)
+            _empty.rotation_euler = (
+                _pmath.radians(_pr),
+                _pmath.radians(-_py),
+                _pmath.radians(_pa),
+            )
+            _empty["model"] = _mdl
+            _empty["skin"] = _prop.get("skin", 0)
+            _empty.parent = area_root
+        print(f"== blend_export: placed {len(_props)} static prop empties", flush=True)
 
     out_dir = Path(args.output).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)

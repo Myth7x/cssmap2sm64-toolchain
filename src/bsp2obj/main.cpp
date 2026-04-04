@@ -55,10 +55,36 @@ static std::string mat_to_obj_name(const std::string& material) {
     return r;
 }
 
+static std::string normalize_material(const std::string& name) {
+    if (name.size() < 5) return name;
+    std::string upper = name.substr(0, 5);
+    for (char& c : upper) c = (char)std::toupper((unsigned char)c);
+    if (upper != "MAPS/") return name;
+    size_t second_slash = name.find('/', 5);
+    if (second_slash == std::string::npos) return name;
+    std::string inner = name.substr(second_slash + 1);
+    static const std::regex suffix_re(R"((_-?\d+){3}$)");
+    std::string stripped = std::regex_replace(inner, suffix_re, "");
+    return stripped.empty() ? inner : stripped;
+}
+
 struct Face {
     std::vector<std::array<float, 3>> verts;
+    std::vector<std::array<float, 2>> uvs;
     std::string material;
 };
+
+static std::array<float, 2> compute_uv(float x, float y, float z,
+                                        const BSPTexInfo& ti,
+                                        const BSPTexData& td) {
+    float u = (x * ti.textureVecs[0][0] + y * ti.textureVecs[0][1]
+             + z * ti.textureVecs[0][2] + ti.textureVecs[0][3])
+            / (float)td.width;
+    float v = (x * ti.textureVecs[1][0] + y * ti.textureVecs[1][1]
+             + z * ti.textureVecs[1][2] + ti.textureVecs[1][3])
+            / (float)td.height;
+    return {u, -v};
+}
 
 static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
     unsigned int hc = std::max(1u, std::thread::hardware_concurrency());
@@ -85,18 +111,21 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
             int nameID = bsp.texdatas[ti.texdata].nameStringTableID;
             if (nameID < 0 || nameID >= (int)bsp.texnames.size()) continue;
 
-            const std::string& matname = bsp.texnames[nameID];
-            if (f.dispInfo < 0 && !keep_tools && is_tool_material(matname)) continue;
+            const std::string& raw_matname = bsp.texnames[nameID];
+            if (f.dispInfo < 0 && !keep_tools && is_tool_material(raw_matname)) continue;
 
+            const std::string matname = normalize_material(raw_matname);
             Face face;
             face.material = matname;
 
+            const BSPTexData& td = bsp.texdatas[ti.texdata];
             for (int e = 0; e < f.numedges; ++e) {
                 int32_t se = bsp.surfedges[f.firstedge + e];
                 uint16_t vi = (se >= 0) ? bsp.edges[se].v[0] : bsp.edges[-se].v[1];
                 if (vi >= bsp.vertices.size()) continue;
                 const BSPVertex& v = bsp.vertices[vi];
                 face.verts.push_back({v.x, v.y, v.z});
+                face.uvs.push_back(compute_uv(v.x, v.y, v.z, ti, td));
             }
 
             if (face.verts.size() < 3) continue;
@@ -142,6 +171,7 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
                     }
                 }
 
+                const BSPTexData& dtd = bsp.texdatas[ti.texdata];
                 for (int gi = 0; gi < N - 1; ++gi) {
                     for (int gj = 0; gj < N - 1; ++gj) {
                         auto A = grid[gi * N + gj];
@@ -150,7 +180,13 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
                         auto D = grid[(gi+1) * N + gj];
                         Face t1, t2;
                         t1.material = matname; t1.verts = {A, B, C};
+                        t1.uvs = {compute_uv(A[0],A[1],A[2],ti,dtd),
+                                  compute_uv(B[0],B[1],B[2],ti,dtd),
+                                  compute_uv(C[0],C[1],C[2],ti,dtd)};
                         t2.material = matname; t2.verts = {A, C, D};
+                        t2.uvs = {compute_uv(A[0],A[1],A[2],ti,dtd),
+                                  compute_uv(C[0],C[1],C[2],ti,dtd),
+                                  compute_uv(D[0],D[1],D[2],ti,dtd)};
                         sub.push_back(std::move(t1));
                         sub.push_back(std::move(t2));
                     }
@@ -213,7 +249,13 @@ static void write_obj(const std::vector<Face>& faces,
                 << " "  << -v[1] * scale << "\n";
         }
     }
-    obj << "\nvt 0 0\n\n";
+    obj << "\n";
+    for (size_t idx : order) {
+        for (const auto& uv : faces[idx].uvs) {
+            obj << "vt " << uv[0] << " " << uv[1] << "\n";
+        }
+    }
+    obj << "\n";
 
     std::string cur_mat;
     size_t vi = 1;
@@ -236,12 +278,30 @@ static void write_obj(const std::vector<Face>& faces,
             float ny = baz*cax - bax*caz;
             float nz = bax*cay - bay*cax;
             if (nx*nx + ny*ny + nz*nz < 1e-6f) continue;
-            obj << "f " << vi       << "/1"
-                << " "  << vi + t+1 << "/1"
-                << " "  << vi + t   << "/1\n";
+            obj << "f " << vi       << "/" << vi
+                << " "  << vi + t+1 << "/" << vi + t+1
+                << " "  << vi + t   << "/" << vi + t   << "\n";
         }
         vi += n;
     }
+}
+
+static void write_props_json(const std::vector<StaticProp>& props, const std::string& path) {
+    std::ofstream f(path);
+    if (!f) throw std::runtime_error("Cannot write props JSON: " + path);
+    f << "[\n";
+    for (size_t i = 0; i < props.size(); ++i) {
+        const auto& p = props[i];
+        f << "  {"
+          << "\"model\":\"" << p.model << "\""
+          << ",\"origin\":[" << p.origin[0] << "," << p.origin[1] << "," << p.origin[2] << "]"
+          << ",\"angles\":[" << p.angles[0] << "," << p.angles[1] << "," << p.angles[2] << "]"
+          << ",\"skin\":" << p.skin
+          << "}";
+        if (i + 1 < props.size()) f << ",";
+        f << "\n";
+    }
+    f << "]\n";
 }
 
 static std::optional<std::array<float, 3>> find_spawn(const std::string& entities) {
@@ -309,7 +369,7 @@ static std::optional<std::array<float, 3>> find_spawn(const std::string& entitie
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        std::cerr << "Usage: bsp2obj <input.bsp> <output.obj> [--scale F] [--keep-tools] [--spawn-out FILE]\n";
+        std::cerr << "Usage: bsp2obj <input.bsp> <output.obj> [--scale F] [--keep-tools] [--spawn-out FILE] [--props-out FILE]\n";
         return 1;
     }
 
@@ -318,6 +378,7 @@ int main(int argc, char* argv[]) {
     double scale = 1.0;
     bool keep_tools = false;
     std::string spawn_out;
+    std::string props_out;
 
     for (int i = 3; i < argc; ++i) {
         std::string arg = argv[i];
@@ -327,6 +388,8 @@ int main(int argc, char* argv[]) {
             scale = std::stod(argv[++i]);
         } else if (arg == "--spawn-out" && i + 1 < argc) {
             spawn_out = argv[++i];
+        } else if (arg == "--props-out" && i + 1 < argc) {
+            props_out = argv[++i];
         }
     }
 
@@ -358,6 +421,15 @@ int main(int argc, char* argv[]) {
             std::cout << "Spawn: " << (*sp)[0] << " " << (*sp)[1] << " " << (*sp)[2] << "\n";
         } else {
             sf << "none\n";
+        }
+    }
+
+    if (!props_out.empty()) {
+        try {
+            write_props_json(bsp.static_props, props_out);
+            std::cout << "Props: " << bsp.static_props.size() << " static props to " << props_out << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Error writing props JSON: " << e.what() << "\n";
         }
     }
 
