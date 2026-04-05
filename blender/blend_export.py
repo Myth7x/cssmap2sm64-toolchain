@@ -112,6 +112,7 @@ def main():
     parser.add_argument("--sky-obj", default=None)
     parser.add_argument("--sky-camera-json", default=None)
     parser.add_argument("--sky-cube-obj", default=None)
+    parser.add_argument("--triggers-json", default=None)
     args = parser.parse_args(argv)
 
     mat_props = {}
@@ -435,6 +436,47 @@ def main():
             _empty["skin"] = _prop.get("skin", 0)
             _empty.parent = area_root
         print(f"== blend_export: placed {len(_props)} static prop empties", flush=True)
+
+    if args.triggers_json and Path(args.triggers_json).exists():
+        with open(args.triggers_json, encoding="utf-8") as _tf:
+            _triggers = json.load(_tf)
+        _TYPE_COLORS = {
+            "death":    (1.0, 0.24, 0.24),
+            "teleport": (0.24, 0.50, 1.0),
+            "script":   (1.0, 0.86, 0.24),
+            "door":     (0.0,  0.78, 0.47),
+            "brush":    (0.24, 0.86, 0.24),
+            "logic":    (1.0,  0.55, 0.0),
+            "landmark": (0.72, 0.72, 0.72),
+        }
+        _trig_col = bpy.data.collections.new("Triggers")
+        bpy.context.scene.collection.children.link(_trig_col)
+        _s = args.bsp_scale
+        for _ti, _trig in enumerate(_triggers):
+            _ox, _oy, _oz = _trig["origin"]
+            _mnx, _mny, _mnz = _trig["mins"]
+            _mxx, _mxy, _mxz = _trig["maxs"]
+            _cx = (_mnx + _mxx) * 0.5 * _s
+            _cy = (_mny + _mxy) * 0.5 * _s
+            _cz = (_mnz + _mxz) * 0.5 * _s
+            _sx2 = max(abs(_mxx - _mnx) * 0.5 * _s, 1.0)
+            _sy2 = max(abs(_mxy - _mny) * 0.5 * _s, 1.0)
+            _sz2 = max(abs(_mxz - _mnz) * 0.5 * _s, 1.0)
+            _ttype = _trig.get("type", "script")
+            _tname = f"trigger_{_ttype}_{_ti:04d}"
+            _te = bpy.data.objects.new(_tname, None)
+            _te.empty_display_type = "CUBE"
+            _te.empty_display_size = 1.0
+            _te.location = (_cx, _cz, -_cy)
+            _te.scale = (_sx2, _sz2, _sy2)
+            _te["trigger_type"] = _ttype
+            _te["trigger_class"] = _trig.get("class", "")
+            _te["targetname"] = _trig.get("targetname", "")
+            _te["target"] = _trig.get("target", "")
+            _tc = _TYPE_COLORS.get(_ttype, (1.0, 1.0, 1.0))
+            _te.color = (_tc[0], _tc[1], _tc[2], 0.5)
+            _trig_col.objects.link(_te)
+        print(f"== blend_export: placed {len(_triggers)} trigger debug empties", flush=True)
 
     out_dir = Path(args.output).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)

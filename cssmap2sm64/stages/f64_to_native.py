@@ -283,6 +283,211 @@ def _split_large_collision_blocks(path: Path, max_verts: int = 32767) -> None:
     path.write_text(out, encoding="utf-8")
 
 
+_EBOX_TYPE = {
+    "death":    1,
+    "teleport": 2,
+    "script":   3,
+    "door":     4,
+    "brush":    5,
+    "logic":    6,
+    "landmark": 7,
+}
+
+_EBOX_TYPE_NAME = {v: k for k, v in _EBOX_TYPE.items()}
+
+
+def _bsp_to_sm64(bsp_x: float, bsp_y: float, bsp_z: float,
+                  scale_factor: float, net: float) -> tuple:
+    return (
+        round(bsp_x * scale_factor * net),
+        round(bsp_z * scale_factor * net),
+        round(-bsp_y * scale_factor * net),
+    )
+
+
+def _clamp_s16(v: int) -> int:
+    return max(-32768, min(32767, v))
+
+
+def _write_entities_inc(
+    dst_path: Path,
+    level_name: str,
+    triggers: list,
+    scale_factor: float,
+    net: float,
+) -> None:
+    landmark_map = {
+        e['targetname']: e['origin']
+        for e in triggers
+        if e.get('type') == 'landmark' and e.get('targetname')
+    }
+    lines = [
+        '#include "game/entity_boxes.h"',
+        '',
+        f'const struct EntityBox {level_name}_entity_boxes[] = {{',
+    ]
+    for t in triggers:
+        ttype = _EBOX_TYPE.get(t.get("type", ""), 0)
+        if ttype == 0:
+            continue
+        mnx, mny, mnz = t["mins"]
+        mxx, mxy, mxz = t["maxs"]
+        sm64_mnx = _clamp_s16(round(mnx * scale_factor * net))
+        sm64_mxx = _clamp_s16(round(mxx * scale_factor * net))
+        sm64_mny = _clamp_s16(round(mnz * scale_factor * net))
+        sm64_mxy = _clamp_s16(round(mxz * scale_factor * net))
+        sm64_mnz = _clamp_s16(round(-mxy * scale_factor * net))
+        sm64_mxz = _clamp_s16(round(-mny * scale_factor * net))
+        r_mnx, r_mxx = min(sm64_mnx, sm64_mxx), max(sm64_mnx, sm64_mxx)
+        r_mny, r_mxy = min(sm64_mny, sm64_mxy), max(sm64_mny, sm64_mxy)
+        r_mnz, r_mxz = min(sm64_mnz, sm64_mxz), max(sm64_mnz, sm64_mxz)
+        if ttype == _EBOX_TYPE['teleport']:
+            target_name = t.get('target', '')
+            bsp_origin = landmark_map.get(target_name, [0, 0, 0])
+            dx, dy, dz = _bsp_to_sm64(bsp_origin[0], bsp_origin[1], bsp_origin[2], scale_factor, net)
+            dest_x, dest_y, dest_z = _clamp_s16(dx), _clamp_s16(dy), _clamp_s16(dz)
+        else:
+            dest_x, dest_y, dest_z = 0, 0, 0
+        lines.append(
+            f'    {{{ttype},'
+            f' {{{r_mnx}, {r_mny}, {r_mnz}}},'
+            f' {{{r_mxx}, {r_mxy}, {r_mxz}}},'
+            f' {{{dest_x}, {dest_y}, {dest_z}}}}},'
+        )
+    lines += [
+        '    {0, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}}',
+        '};',
+        '',
+        f's32 {level_name}_entities_init(UNUSED s16 arg, UNUSED s32 unused) {{',
+        f'    entity_boxes_register({level_name}_entity_boxes);',
+        '    return 0;',
+        '}',
+        '',
+    ]
+    dst_path.write_text('\n'.join(lines), encoding='utf-8')
+
+
+def _patch_header_entities(header_path: Path, level_name: str) -> None:
+    text = header_path.read_text(encoding='utf-8')
+    inc_line   = '#include "game/entity_boxes.h"\n'
+    decl_box   = f'extern const struct EntityBox {level_name}_entity_boxes[];\n'
+    decl_fn    = f's32 {level_name}_entities_init(s16, s32);\n'
+    # Build the block to insert (include must precede the extern)
+    block = ''
+    if inc_line not in text:
+        block += inc_line
+    if decl_box not in text:
+        block += decl_box
+    if decl_fn not in text:
+        block += decl_fn
+    if not block:
+        return
+    # Insert before #endif at end of file
+    text = text.rstrip()
+    if text.endswith('#endif'):
+        text = text[:-len('#endif')].rstrip() + '\n\n' + block + '#endif\n'
+    else:
+        text += '\n' + block
+    header_path.write_text(text, encoding='utf-8')
+
+
+def _inject_triggers(
+    script_path: Path,
+    triggers: list,
+    collision_divisor: int,
+    scale_factor: float,
+    blender_to_sm64_scale: float,
+    level_name: str,
+) -> None:
+    try:
+        text = script_path.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return
+
+    net = blender_to_sm64_scale / collision_divisor
+
+    death_objs = []
+    teleport_objs = []
+    warp_nodes = []
+    warp_id = 0x10
+
+    for t in triggers:
+        ox, oy, oz = t["origin"]
+        mnx, mny, mnz = t["mins"]
+        mxx, mxy, mxz = t["maxs"]
+        sm_x, sm_y, sm_z = _bsp_to_sm64(ox, oy, oz, scale_factor, net)
+
+        ttype = t.get("type", "")
+
+        if ttype == "death":
+            hw = max(abs(mxx - mnx), abs(mxy - mny), abs(mxz - mnz)) * 0.5
+            radius_sm64 = hw * scale_factor * net
+            param_val = max(1, min(25, round(radius_sm64 / 10.0)))
+            beh_param = (param_val << 24) & 0xFFFFFFFF
+            death_objs.append(
+                f'\t\tOBJECT(MODEL_NONE, {sm_x}, {sm_y}, {sm_z},'
+                f' 0, 0, 0, {beh_param:#010x}, bhvDeathWarp),'
+            )
+
+        elif ttype == "teleport":
+            src_id = warp_id
+            warp_id = (warp_id + 1) & 0xEF
+            if warp_id >= 0xF0:
+                warp_id = 0x10
+            dest_id = src_id
+            tname = t.get("targetname", "")
+            landmark_pos = None
+            for lt in triggers:
+                if lt.get("type") == "landmark" and lt.get("targetname") == t.get("target", ""):
+                    lox, loy, loz = lt["origin"]
+                    landmark_pos = _bsp_to_sm64(lox, loy, loz, scale_factor, net)
+                    break
+            beh_param = ((src_id & 0xFF) << 16) & 0xFFFFFFFF
+            teleport_objs.append(
+                f'\t\tOBJECT(MODEL_NONE, {sm_x}, {sm_y}, {sm_z},'
+                f' 0, 0, 0, {beh_param:#010x}, bhvInstantActiveWarp),'
+            )
+            level_const = 'LEVEL_' + level_name.upper()
+            warp_nodes.append(
+                f'\t\tWARP_NODE(0x{src_id:02X}, {level_const}, 0x01, 0x{dest_id:02X}, 0x00),'
+            )
+            if landmark_pos:
+                lx, ly, lz = landmark_pos
+                teleport_objs.append(
+                    f'\t\tOBJECT(MODEL_NONE, {lx}, {ly}, {lz},'
+                    f' 0, 0, 0, {beh_param:#010x}, bhvInstantActiveWarp),'
+                )
+
+    all_objects = death_objs + teleport_objs
+
+    entities_call = f'\t\tCALL(0, {level_name}_entities_init),\n'
+
+    if all_objects:
+        obj_block = '\n'.join(all_objects) + '\n'
+        text = re.sub(
+            r'(\s*END_AREA\s*\(\s*\)\s*,)',
+            '\n' + obj_block + r'\1',
+            text, count=1,
+        )
+
+    if warp_nodes:
+        wn_block = '\n'.join(warp_nodes) + '\n'
+        text = re.sub(
+            r'(\s*END_AREA\s*\(\s*\)\s*,)',
+            '\n' + wn_block + r'\1',
+            text, count=1,
+        )
+
+    if entities_call not in text:
+        text = re.sub(
+            r'([ \t]*CALL\s*\(\s*0\s*,\s*lvl_init_or_update\s*\)\s*,[ \t]*\n)',
+            r'\1' + entities_call,
+            text,
+        )
+
+    script_path.write_text(text, encoding='utf-8')
+
+
 def convert(
     fast64_dir: Path,
     out_dir: Path,
@@ -291,6 +496,9 @@ def convert(
     sm64_spawn: Optional[Tuple[int, int, int]] = None,
     skybox_bin: str = "water",
     env_json: Optional[Path] = None,
+    triggers_json: Optional[Path] = None,
+    scale_factor: float = 1.0,
+    blender_to_sm64_scale: float = 300.0,
 ) -> None:
     fast64_dir = Path(fast64_dir)
     out_dir = Path(out_dir)
@@ -330,9 +538,40 @@ def convert(
                 env = json.load(_f)
             _write_level_lighting(out_dir / "level_lighting.inc.c", env)
 
-    _write_leveldata(out_dir / "leveldata.c", level_name, has_lighting=(env is not None)) 
+    _write_leveldata(out_dir / "leveldata.c", level_name, has_lighting=(env is not None))
 
     _write_script(fast64_dir / "script.c", out_dir / "script.c", sm64_spawn)
+
+    triggers = []
+    if triggers_json is not None:
+        _tj = Path(triggers_json)
+        if _tj.exists():
+            with open(_tj, encoding="utf-8") as _tf:
+                triggers = json.load(_tf)
+
+    if triggers:
+        net = blender_to_sm64_scale / collision_divisor
+        _write_entities_inc(
+            out_dir / "entities.inc.c",
+            level_name,
+            triggers,
+            scale_factor,
+            net,
+        )
+        _patch_header_entities(out_dir / "header.h", level_name)
+        ld_path = out_dir / "leveldata.c"
+        ld_text = ld_path.read_text(encoding="utf-8")
+        ent_include = f'#include "levels/{level_name}/entities.inc.c"\n'
+        if ent_include not in ld_text:
+            ld_path.write_text(ld_text + ent_include, encoding="utf-8")
+        _inject_triggers(
+            out_dir / "script.c",
+            triggers,
+            collision_divisor,
+            scale_factor,
+            blender_to_sm64_scale,
+            level_name,
+        )
 
     _write_level_yaml(out_dir / "level.yaml", level_name, skybox_bin)
 

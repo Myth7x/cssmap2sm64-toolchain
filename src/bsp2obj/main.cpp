@@ -87,6 +87,27 @@ static std::array<float, 2> compute_uv(float x, float y, float z,
 }
 
 static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
+    // Build per-face origin from the BSP model that owns each face.
+    // Source BSP stores brush entity vertices in entity-local space (relative to
+    // model.origin); we add the origin to convert to world space.
+    // Faces not owned by any model are unreferenced garbage and are skipped.
+    struct FaceInfo { bool valid; float ox, oy, oz; };
+    std::vector<FaceInfo> face_info(bsp.faces.size(), {false, 0.f, 0.f, 0.f});
+    for (int mi = 0; mi < (int)bsp.models.size(); ++mi) {
+        const auto& mdl = bsp.models[mi];
+        int first = mdl.firstface;
+        int last  = first + mdl.numfaces;
+        if (first < 0) continue;
+        float ox = 0.f, oy = 0.f, oz = 0.f;
+        if (mi < (int)bsp.model_world_origins.size()) {
+            ox = bsp.model_world_origins[mi][0];
+            oy = bsp.model_world_origins[mi][1];
+            oz = bsp.model_world_origins[mi][2];
+        }
+        for (int fi = first; fi < last && fi < (int)bsp.faces.size(); ++fi)
+            face_info[fi] = {true, ox, oy, oz};
+    }
+
     unsigned int hc = std::max(1u, std::thread::hardware_concurrency());
     size_t total = bsp.faces.size();
     size_t chunk_size = (total + hc - 1) / hc;
@@ -94,6 +115,10 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
     auto process_range = [&](size_t lo, size_t hi) -> std::vector<Face> {
         std::vector<Face> sub;
         for (size_t fi = lo; fi < hi; ++fi) {
+            const FaceInfo& fi_info = face_info[fi];
+            if (!fi_info.valid) continue;
+            const float ox = fi_info.ox, oy = fi_info.oy, oz = fi_info.oz;
+
             const auto& f = bsp.faces[fi];
             if (f.numedges < 3) continue;
             if (f.texinfo < 0 || f.texinfo >= (int)bsp.texinfos.size()) continue;
@@ -128,8 +153,9 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
                 uint16_t vi = (se >= 0) ? bsp.edges[ei].v[0] : bsp.edges[ei].v[1];
                 if (vi >= bsp.vertices.size()) continue;
                 const BSPVertex& v = bsp.vertices[vi];
-                face.verts.push_back({v.x, v.y, v.z});
-                face.uvs.push_back(compute_uv(v.x, v.y, v.z, ti, td));
+                float wx = v.x + ox, wy = v.y + oy, wz = v.z + oz;
+                face.verts.push_back({wx, wy, wz});
+                face.uvs.push_back(compute_uv(wx, wy, wz, ti, td));
             }
 
             if (face.verts.size() < 3) continue;
@@ -142,9 +168,9 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
                 int start_idx = 0;
                 float best = std::numeric_limits<float>::max();
                 for (int k = 0; k < 4; ++k) {
-                    float dx = face.verts[k][0] - di.startPosition[0];
-                    float dy = face.verts[k][1] - di.startPosition[1];
-                    float dz = face.verts[k][2] - di.startPosition[2];
+                    float dx = face.verts[k][0] - (di.startPosition[0] + ox);
+                    float dy = face.verts[k][1] - (di.startPosition[1] + oy);
+                    float dz = face.verts[k][2] - (di.startPosition[2] + oz);
                     float d = dx*dx + dy*dy + dz*dz;
                     if (d < best) { best = d; start_idx = k; }
                 }
@@ -497,9 +523,167 @@ static std::optional<std::array<float, 3>> find_spawn(const std::string& entitie
     return std::nullopt;
 }
 
+static const std::unordered_map<std::string, std::string> ENTITY_TYPE_MAP = {
+    {"trigger_hurt",         "death"},
+    {"trigger_push",         "death"},
+    {"trigger_kill",         "death"},
+    {"trigger_teleport",     "teleport"},
+    {"trigger_multiple",     "script"},
+    {"trigger_once",         "script"},
+    {"trigger_changelevel",  "script"},
+    {"trigger_look",         "script"},
+    {"trigger_proximity",    "script"},
+    {"trigger_wind",         "script"},
+    {"func_door",            "door"},
+    {"func_door_rotating",   "door"},
+    {"func_rotating",        "door"},
+    {"func_movelinear",      "door"},
+    {"func_tracktrain",      "door"},
+    {"func_brush",           "brush"},
+    {"func_wall",            "brush"},
+    {"func_illusionary",     "brush"},
+    {"func_detail",          "brush"},
+    {"func_lod",             "brush"},
+    {"func_occluder",        "brush"},
+    {"logic_relay",          "logic"},
+    {"logic_case",           "logic"},
+    {"logic_auto",           "logic"},
+    {"logic_timer",          "logic"},
+    {"logic_branch",         "logic"},
+    {"logic_compare",        "logic"},
+    {"logic_multicompare",   "logic"},
+    {"info_landmark",        "landmark"},
+    {"info_target",          "landmark"},
+    {"info_teleport_destination", "landmark"},
+};
+
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 4);
+    for (unsigned char c : s) {
+        if (c == '"')       out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else if (c < 0x20)  out += "?";
+        else                out += (char)c;
+    }
+    return out;
+}
+
+static void write_triggers_json(
+    const std::string& entities,
+    const std::vector<BSPModel>& models,
+    const std::vector<std::array<float,3>>& bsp_world_origins,
+    const std::string& path)
+{
+    auto trim = [](const std::string& s) {
+        size_t a = s.find_first_not_of(" \t\r\n");
+        size_t b = s.find_last_not_of(" \t\r\n");
+        if (a == std::string::npos) return std::string{};
+        return s.substr(a, b - a + 1);
+    };
+
+    std::ofstream f(path);
+    if (!f) throw std::runtime_error("Cannot write triggers JSON: " + path);
+
+    std::istringstream ss(entities);
+    std::string line;
+    bool in_ent = false;
+    std::unordered_map<std::string, std::string> kv;
+
+    std::vector<std::unordered_map<std::string, std::string>> ent_list;
+
+    while (std::getline(ss, line)) {
+        std::string tl = trim(line);
+        if (tl == "{") { in_ent = true; kv.clear(); continue; }
+        if (tl == "}") {
+            if (in_ent && !kv.empty()) ent_list.push_back(kv);
+            in_ent = false; continue;
+        }
+        if (!in_ent) continue;
+        std::regex kv_re("\"([^\"]+)\"\\s+\"([^\"]+)\"");
+        std::smatch m;
+        if (std::regex_search(tl, m, kv_re))
+            kv[m[1].str()] = m[2].str();
+    }
+
+    f << "[\n";
+    size_t written = 0;
+    for (const auto& e : ent_list) {
+        auto it_class = e.find("classname");
+        if (it_class == e.end()) continue;
+        const std::string& cls = it_class->second;
+        auto it_type = ENTITY_TYPE_MAP.find(cls);
+        if (it_type == ENTITY_TYPE_MAP.end()) continue;
+        const std::string& type = it_type->second;
+
+        std::string targetname, target, model_key;
+        float mins[3]{}, maxs[3]{}, origin[3]{};
+        bool has_aabb = false;
+
+        auto get = [&](const std::string& k, std::string& out) {
+            auto it = e.find(k);
+            if (it != e.end()) out = it->second;
+        };
+
+        get("targetname", targetname);
+        get("target",     target);
+        get("model",      model_key);
+
+        if (!model_key.empty() && model_key[0] == '*') {
+            int idx = -1;
+            try { idx = std::stoi(model_key.substr(1)); } catch (...) {}
+            if (idx > 0 && idx < (int)models.size()) {
+                const BSPModel& mdl = models[idx];
+                float wo[3] = {0.f, 0.f, 0.f};
+                if (idx < (int)bsp_world_origins.size()) {
+                    wo[0] = bsp_world_origins[idx][0];
+                    wo[1] = bsp_world_origins[idx][1];
+                    wo[2] = bsp_world_origins[idx][2];
+                }
+                mins[0] = mdl.mins[0] + wo[0]; mins[1] = mdl.mins[1] + wo[1]; mins[2] = mdl.mins[2] + wo[2];
+                maxs[0] = mdl.maxs[0] + wo[0]; maxs[1] = mdl.maxs[1] + wo[1]; maxs[2] = mdl.maxs[2] + wo[2];
+                origin[0] = (mins[0]+maxs[0])*0.5f;
+                origin[1] = (mins[1]+maxs[1])*0.5f;
+                origin[2] = (mins[2]+maxs[2])*0.5f;
+                has_aabb = true;
+            }
+        }
+
+        if (!has_aabb) {
+            auto it_o = e.find("origin");
+            if (it_o != e.end()) {
+                std::istringstream vs(it_o->second);
+                if (vs >> origin[0] >> origin[1] >> origin[2]) {
+                    const float r = 32.0f;
+                    mins[0] = origin[0]-r; mins[1] = origin[1]-r; mins[2] = origin[2]-r;
+                    maxs[0] = origin[0]+r; maxs[1] = origin[1]+r; maxs[2] = origin[2]+r;
+                    has_aabb = true;
+                }
+            }
+        }
+
+        if (!has_aabb) continue;
+
+        if (written > 0) f << ",\n";
+        f << "  {"
+          << "\"class\":\"" << json_escape(cls) << "\""
+          << ",\"type\":\"" << json_escape(type) << "\""
+          << ",\"targetname\":\"" << json_escape(targetname) << "\""
+          << ",\"target\":\"" << json_escape(target) << "\""
+          << ",\"origin\":[" << origin[0] << "," << origin[1] << "," << origin[2] << "]"
+          << ",\"mins\":["   << mins[0]   << "," << mins[1]   << "," << mins[2]   << "]"
+          << ",\"maxs\":["   << maxs[0]   << "," << maxs[1]   << "," << maxs[2]   << "]"
+          << "}";
+        ++written;
+    }
+
+    f << "\n]\n";
+    std::cout << "Triggers: " << written << " entities to " << path << "\n";
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        std::cerr << "Usage: bsp2obj <input.bsp> <output.obj> [--scale F] [--keep-tools] [--spawn-out FILE] [--props-out FILE] [--skybox-out FILE] [--sky-camera-out FILE] [--sky-radius F]\n";
+        std::cerr << "Usage: bsp2obj <input.bsp> <output.obj> [--scale F] [--keep-tools] [--spawn-out FILE] [--props-out FILE] [--skybox-out FILE] [--sky-camera-out FILE] [--sky-radius F] [--triggers-out FILE]\n";
         return 1;
     }
 
@@ -511,6 +695,7 @@ int main(int argc, char* argv[]) {
     std::string props_out;
     std::string skybox_out;
     std::string sky_camera_out;
+    std::string triggers_out;
     float sky_radius = 0.0f;
 
     for (int i = 3; i < argc; ++i) {
@@ -529,6 +714,8 @@ int main(int argc, char* argv[]) {
             sky_camera_out = argv[++i];
         } else if (arg == "--sky-radius" && i + 1 < argc) {
             sky_radius = std::stof(argv[++i]);
+        } else if (arg == "--triggers-out" && i + 1 < argc) {
+            triggers_out = argv[++i];
         }
     }
 
@@ -626,6 +813,14 @@ int main(int argc, char* argv[]) {
             std::cout << "Props: " << bsp.static_props.size() << " static props to " << props_out << "\n";
         } catch (const std::exception& e) {
             std::cerr << "Error writing props JSON: " << e.what() << "\n";
+        }
+    }
+
+    if (!triggers_out.empty()) {
+        try {
+            write_triggers_json(bsp.entities, bsp.models, bsp.model_world_origins, triggers_out);
+        } catch (const std::exception& e) {
+            std::cerr << "Error writing triggers JSON: " << e.what() << "\n";
         }
     }
 

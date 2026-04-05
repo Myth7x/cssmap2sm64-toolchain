@@ -94,16 +94,27 @@ struct BSPDispInfo {
 static_assert(sizeof(BSPDispInfo) == 176, "BSPDispInfo size mismatch");
 
 struct BSPDispVert {
-    float vec[3];   // displacement direction
-    float dist;     // displacement magnitude
-    float alpha;    // blend alpha
+    float vec[3];
+    float dist;
+    float alpha;
 };
 static_assert(sizeof(BSPDispVert) == 20, "BSPDispVert size mismatch");
+
+struct BSPModel {
+    float mins[3];
+    float maxs[3];
+    float origin[3];
+    int32_t headnode;
+    int32_t firstface;
+    int32_t numfaces;
+};
+static_assert(sizeof(BSPModel) == 48, "BSPModel size mismatch");
 
 #pragma pack(pop)
 
 static constexpr int LUMP_ENTITIES   = 0;
 static constexpr int LUMP_PLANES     = 1;
+static constexpr int LUMP_MODELS     = 14;
 static constexpr int LUMP_TEXDATA    = 2;
 static constexpr int LUMP_VERTICES   = 3;
 static constexpr int LUMP_NODES      = 5;
@@ -156,4 +167,10 @@ struct BSPData {
     std::vector<BSPDispVert>  dispverts;
     std::string              entities;
     std::vector<StaticProp>  static_props;
+    std::vector<BSPModel>    models;
+    // World-space origin per model index, parsed from the entity text lump.
+    // model[0] = worldspawn at (0,0,0). For brush entities, VBSP stores face
+    // vertices in the entity's local space and the world position is only in
+    // the entity lump's "origin" key.
+    std::vector<std::array<float,3>> model_world_origins;
 };

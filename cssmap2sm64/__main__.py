@@ -193,9 +193,10 @@ def main():
     else:
         blender_path = None
 
-    obj_path    = out / (bsp.stem + ".obj")
-    spawn_file  = out / (bsp.stem + ".spawn")
-    props_file  = out / (bsp.stem + ".props.json")
+    obj_path       = out / (bsp.stem + ".obj")
+    spawn_file     = out / (bsp.stem + ".spawn")
+    props_file     = out / (bsp.stem + ".props.json")
+    triggers_file  = out / (bsp.stem + ".triggers.json")
     sky_obj_path   = out / (bsp.stem + ".sky.obj")
     sky_cam_path   = out / (bsp.stem + ".sky_camera.json")
     tex_dir     = out / "textures"
@@ -217,6 +218,7 @@ def main():
         "--skybox-out", str(sky_obj_path),
         "--sky-camera-out", str(sky_cam_path),
         "--sky-radius", str(cfg["sky_radius"]),
+        "--triggers-out", str(triggers_file),
     ]
     if args.keep_tools:
         bsp2obj_cmd.append("--keep-tools")
@@ -367,6 +369,7 @@ def main():
         sky_obj=str(sky_obj_path) if sky_obj_path.exists() else None,
         sky_camera_json=str(sky_cam_path) if sky_cam_path.exists() else None,
         sky_cube_obj=str(sky_cube_obj_path) if sky_cube_obj_path and sky_cube_obj_path.exists() else None,
+        triggers_json=triggers_file if triggers_file.exists() else None,
     )
     level_name = cfg["level_name"]
     print("[4/5] Converting Fast64 output to native sm64-port format...")
@@ -383,6 +386,9 @@ def main():
         sm64_spawn=sm64_spawn,
         skybox_bin=skybox_bin,
         env_json=env_json_path,
+        triggers_json=triggers_file if triggers_file.exists() else None,
+        scale_factor=cfg["scale_factor"],
+        blender_to_sm64_scale=cfg["blender_to_sm64_scale"],
     )
     if sky_obj_path.exists() and sky_camera_data is not None:
         print("[4b/5] Converting sky Fast64 output to native format...")

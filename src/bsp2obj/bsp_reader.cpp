@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -53,6 +54,7 @@ BSPData load_bsp(const std::string& path) {
     bsp.surfedges = lump_as<int32_t>    (data, hdr.lumps[LUMP_SURFEDGES]);
     bsp.faces     = lump_as<BSPFace>    (data, hdr.lumps[LUMP_FACES]);
     bsp.texinfos  = lump_as<BSPTexInfo> (data, hdr.lumps[LUMP_TEXINFO]);
+    bsp.models    = lump_as<BSPModel>   (data, hdr.lumps[LUMP_MODELS]);
     bsp.texdatas  = lump_as<BSPTexData> (data, hdr.lumps[LUMP_TEXDATA]);
     bsp.brushes   = lump_as<BSPBrush>   (data, hdr.lumps[LUMP_BRUSHES]);
     bsp.brushsides = lump_as<BSPBrushSide>(data, hdr.lumps[LUMP_BRUSHSIDES]);
@@ -197,6 +199,64 @@ BSPData load_bsp(const std::string& path) {
                 }
                 break;
             }
+        }
+    }
+
+    // Build model_world_origins: parse entity text to find each brush entity's
+    // world-space origin (stored as the "origin" key in the entity lump).
+    // VBSP stores brush entity face vertices in local space; the world position
+    // is ONLY in the entity text, NOT in BSPModel.origin (which is always 0).
+    {
+        bsp.model_world_origins.assign(bsp.models.size(), {0.f, 0.f, 0.f});
+
+        auto trim = [](const std::string& s) {
+            size_t a = s.find_first_not_of(" \t\r\n");
+            size_t b = s.find_last_not_of(" \t\r\n");
+            if (a == std::string::npos) return std::string{};
+            return s.substr(a, b - a + 1);
+        };
+
+        std::istringstream ss(bsp.entities);
+        std::string line;
+        bool in_ent = false;
+        std::string model_key, origin_str;
+        bool has_model = false, has_origin = false;
+
+        while (std::getline(ss, line)) {
+            std::string tl = trim(line);
+            if (tl == "{") {
+                in_ent = true; has_model = false; has_origin = false;
+                model_key.clear(); origin_str.clear();
+                continue;
+            }
+            if (tl == "}") {
+                if (in_ent && has_model && has_origin && !model_key.empty() && model_key[0] == '*') {
+                    int idx = -1;
+                    try { idx = std::stoi(model_key.substr(1)); } catch (...) {}
+                    if (idx > 0 && idx < (int)bsp.model_world_origins.size()) {
+                        std::istringstream vs(origin_str);
+                        float ox = 0.f, oy = 0.f, oz = 0.f;
+                        if (vs >> ox >> oy >> oz)
+                            bsp.model_world_origins[idx] = {ox, oy, oz};
+                    }
+                }
+                in_ent = false;
+                continue;
+            }
+            if (!in_ent) continue;
+            // Parse "key" "value"
+            size_t q1 = tl.find('"');
+            if (q1 == std::string::npos) continue;
+            size_t q2 = tl.find('"', q1 + 1);
+            if (q2 == std::string::npos) continue;
+            size_t q3 = tl.find('"', q2 + 1);
+            if (q3 == std::string::npos) continue;
+            size_t q4 = tl.find('"', q3 + 1);
+            if (q4 == std::string::npos) continue;
+            std::string key = tl.substr(q1 + 1, q2 - q1 - 1);
+            std::string val = tl.substr(q3 + 1, q4 - q3 - 1);
+            if (key == "model") { model_key = val; has_model = true; }
+            else if (key == "origin") { origin_str = val; has_origin = true; }
         }
     }
 
