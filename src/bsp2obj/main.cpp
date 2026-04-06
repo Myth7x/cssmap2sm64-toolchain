@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 static const std::vector<std::string> TOOL_PREFIXES = {
@@ -72,6 +73,7 @@ struct Face {
     std::vector<std::array<float, 3>> verts;
     std::vector<std::array<float, 2>> uvs;
     std::string material;
+    int model_index = 0;
 };
 
 static std::array<float, 2> compute_uv(float x, float y, float z,
@@ -91,8 +93,8 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
     // Source BSP stores brush entity vertices in entity-local space (relative to
     // model.origin); we add the origin to convert to world space.
     // Faces not owned by any model are unreferenced garbage and are skipped.
-    struct FaceInfo { bool valid; float ox, oy, oz; };
-    std::vector<FaceInfo> face_info(bsp.faces.size(), {false, 0.f, 0.f, 0.f});
+    struct FaceInfo { bool valid; float ox, oy, oz; int model_index; };
+    std::vector<FaceInfo> face_info(bsp.faces.size(), {false, 0.f, 0.f, 0.f, 0});
     for (int mi = 0; mi < (int)bsp.models.size(); ++mi) {
         const auto& mdl = bsp.models[mi];
         int first = mdl.firstface;
@@ -105,7 +107,7 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
             oz = bsp.model_world_origins[mi][2];
         }
         for (int fi = first; fi < last && fi < (int)bsp.faces.size(); ++fi)
-            face_info[fi] = {true, ox, oy, oz};
+            face_info[fi] = {true, ox, oy, oz, mi};
     }
 
     unsigned int hc = std::max(1u, std::thread::hardware_concurrency());
@@ -142,6 +144,7 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
             const std::string matname = normalize_material(raw_matname);
             Face face;
             face.material = matname;
+            face.model_index = fi_info.model_index;
 
             const BSPTexData& td = bsp.texdatas[ti.texdata];
             for (int e = 0; e < f.numedges; ++e) {
@@ -525,7 +528,7 @@ static std::optional<std::array<float, 3>> find_spawn(const std::string& entitie
 
 static const std::unordered_map<std::string, std::string> ENTITY_TYPE_MAP = {
     {"trigger_hurt",         "death"},
-    {"trigger_push",         "death"},
+    {"trigger_push",         "push"},
     {"trigger_kill",         "death"},
     {"trigger_teleport",     "teleport"},
     {"trigger_multiple",     "script"},
@@ -555,6 +558,7 @@ static const std::unordered_map<std::string, std::string> ENTITY_TYPE_MAP = {
     {"info_landmark",        "landmark"},
     {"info_target",          "landmark"},
     {"info_teleport_destination", "landmark"},
+    {"ambient_generic",      "sound"},
 };
 
 static std::string json_escape(const std::string& s) {
@@ -569,11 +573,139 @@ static std::string json_escape(const std::string& s) {
     return out;
 }
 
+static void write_entity_objs(
+    const std::string& entities,
+    const std::vector<BSPModel>& models,
+    const std::vector<std::array<float,3>>& bsp_world_origins,
+    const std::vector<Face>& faces,
+    const std::string& output_dir,
+    double scale,
+    std::unordered_map<int, std::string>& out_meshfiles)
+{
+    std::filesystem::create_directories(output_dir);
+
+    auto trim = [](const std::string& s) {
+        size_t a = s.find_first_not_of(" \t\r\n");
+        size_t b = s.find_last_not_of(" \t\r\n");
+        if (a == std::string::npos) return std::string{};
+        return s.substr(a, b - a + 1);
+    };
+
+    std::istringstream ss(entities);
+    std::string line;
+    bool in_ent = false;
+    std::unordered_map<std::string, std::string> kv;
+    std::vector<std::unordered_map<std::string, std::string>> ent_list;
+
+    while (std::getline(ss, line)) {
+        std::string tl = trim(line);
+        if (tl == "{") { in_ent = true; kv.clear(); continue; }
+        if (tl == "}") {
+            if (in_ent && !kv.empty()) ent_list.push_back(kv);
+            in_ent = false; continue;
+        }
+        if (!in_ent) continue;
+        std::regex kv_re("\"([^\"]+)\"\\s+\"([^\"]+)\"");
+        std::smatch m;
+        if (std::regex_search(tl, m, kv_re)) kv[m[1].str()] = m[2].str();
+    }
+
+    int door_idx = 0;
+    for (const auto& e : ent_list) {
+        auto it_class = e.find("classname");
+        if (it_class == e.end()) continue;
+        auto it_type = ENTITY_TYPE_MAP.find(it_class->second);
+        if (it_type == ENTITY_TYPE_MAP.end() || it_type->second != "door") continue;
+
+        auto it_model = e.find("model");
+        if (it_model == e.end() || it_model->second.empty() || it_model->second[0] != '*') continue;
+        int midx = -1;
+        try { midx = std::stoi(it_model->second.substr(1)); } catch (...) {}
+        if (midx <= 0 || midx >= (int)models.size()) continue;
+
+        float wo[3] = {0.f, 0.f, 0.f};
+        if (midx < (int)bsp_world_origins.size()) {
+            wo[0] = bsp_world_origins[midx][0];
+            wo[1] = bsp_world_origins[midx][1];
+            wo[2] = bsp_world_origins[midx][2];
+        }
+        const BSPModel& mdl = models[midx];
+        float cx = (mdl.mins[0] + mdl.maxs[0]) * 0.5f + wo[0];
+        float cy = (mdl.mins[1] + mdl.maxs[1]) * 0.5f + wo[1];
+        float cz = (mdl.mins[2] + mdl.maxs[2]) * 0.5f + wo[2];
+
+        std::vector<Face> ent_faces;
+        for (const auto& f : faces)
+            if (f.model_index == midx) ent_faces.push_back(f);
+        if (ent_faces.empty()) { ++door_idx; continue; }
+
+        std::string fname = "moving_" + std::to_string(door_idx) + ".obj";
+        std::string obj_path = output_dir + "/" + fname;
+        std::string mtl_path = output_dir + "/moving_" + std::to_string(door_idx) + ".mtl";
+        std::string mtl_basename = "moving_" + std::to_string(door_idx) + ".mtl";
+
+        std::ofstream obj(obj_path);
+        std::ofstream mtl(mtl_path);
+        if (!obj || !mtl) { ++door_idx; continue; }
+
+        std::set<std::string> seen;
+        for (const auto& f : ent_faces) {
+            std::string n = mat_to_obj_name(f.material);
+            if (seen.insert(n).second) mtl << "newmtl " << n << "\n\n";
+        }
+        obj << "mtllib " << mtl_basename << "\n\n";
+
+        std::vector<size_t> order(ent_faces.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            return mat_to_obj_name(ent_faces[a].material) < mat_to_obj_name(ent_faces[b].material);
+        });
+
+        for (size_t idx : order)
+            for (const auto& v : ent_faces[idx].verts)
+                obj << "v " << (v[0]-cx)*scale << " " << (v[2]-cz)*scale << " " << -(v[1]-cy)*scale << "\n";
+        obj << "\n";
+        for (size_t idx : order)
+            for (const auto& uv : ent_faces[idx].uvs)
+                obj << "vt " << uv[0] << " " << uv[1] << "\n";
+        obj << "\n";
+
+        std::string cur_mat;
+        size_t vi = 1;
+        for (size_t idx : order) {
+            const auto& f = ent_faces[idx];
+            std::string mat = mat_to_obj_name(f.material);
+            if (mat != cur_mat) {
+                obj << "o " << mat << "\n";
+                obj << "usemtl " << mat << "\n";
+                cur_mat = mat;
+            }
+            size_t n = f.verts.size();
+            for (size_t t = 1; t < n - 1; ++t) {
+                const auto& A = f.verts[0]; const auto& B = f.verts[t]; const auto& C = f.verts[t+1];
+                float bax=B[0]-A[0],bay=B[1]-A[1],baz=B[2]-A[2];
+                float cax=C[0]-A[0],cay=C[1]-A[1],caz=C[2]-A[2];
+                float nx=bay*caz-baz*cay, ny=baz*cax-bax*caz, nz=bax*cay-bay*cax;
+                if (nx*nx+ny*ny+nz*nz < 1e-6f) continue;
+                obj << "f " << vi << "/" << vi
+                    << " " << vi+t+1 << "/" << vi+t+1
+                    << " " << vi+t   << "/" << vi+t << "\n";
+            }
+            vi += n;
+        }
+
+        out_meshfiles[midx] = fname;
+        std::cout << "Moving brush " << door_idx << ": " << ent_faces.size() << " faces to " << fname << "\n";
+        ++door_idx;
+    }
+}
+
 static void write_triggers_json(
     const std::string& entities,
     const std::vector<BSPModel>& models,
     const std::vector<std::array<float,3>>& bsp_world_origins,
-    const std::string& path)
+    const std::string& path,
+    const std::unordered_map<int, std::string>& meshfiles = {})
 {
     auto trim = [](const std::string& s) {
         size_t a = s.find_first_not_of(" \t\r\n");
@@ -606,6 +738,67 @@ static void write_triggers_json(
             kv[m[1].str()] = m[2].str();
     }
 
+    std::unordered_map<std::string, size_t> targetname_to_ent_idx;
+    for (size_t i = 0; i < ent_list.size(); i++) {
+        const auto& e = ent_list[i];
+        auto it_class = e.find("classname");
+        if (it_class == e.end()) continue;
+        auto it_type = ENTITY_TYPE_MAP.find(it_class->second);
+        if (it_type == ENTITY_TYPE_MAP.end() || it_type->second != "door") continue;
+        auto it_tn = e.find("targetname");
+        if (it_tn != e.end() && !it_tn->second.empty())
+            targetname_to_ent_idx[it_tn->second] = i;
+    }
+    static const std::unordered_set<std::string> ACTIVATOR_CLASSES = {
+        "trigger_multiple", "trigger_once", "func_button"
+    };
+    std::unordered_map<std::string, std::array<float, 6>> door_activators;
+    for (const auto& e : ent_list) {
+        auto it_class = e.find("classname");
+        if (it_class == e.end()) continue;
+        if (ACTIVATOR_CLASSES.find(it_class->second) == ACTIVATOR_CLASSES.end()) continue;
+        auto it_tgt = e.find("target");
+        if (it_tgt == e.end() || it_tgt->second.empty()) continue;
+        if (targetname_to_ent_idx.find(it_tgt->second) == targetname_to_ent_idx.end()) continue;
+        float tmins[3]{}, tmaxs[3]{};
+        bool got_aabb = false;
+        auto it_model2 = e.find("model");
+        if (it_model2 != e.end() && !it_model2->second.empty() && it_model2->second[0] == '*') {
+            int midx = -1;
+            try { midx = std::stoi(it_model2->second.substr(1)); } catch (...) {}
+            if (midx > 0 && midx < (int)models.size()) {
+                float wo[3] = {0.f, 0.f, 0.f};
+                if (midx < (int)bsp_world_origins.size()) {
+                    wo[0] = bsp_world_origins[midx][0];
+                    wo[1] = bsp_world_origins[midx][1];
+                    wo[2] = bsp_world_origins[midx][2];
+                }
+                tmins[0] = models[midx].mins[0] + wo[0];
+                tmins[1] = models[midx].mins[1] + wo[1];
+                tmins[2] = models[midx].mins[2] + wo[2];
+                tmaxs[0] = models[midx].maxs[0] + wo[0];
+                tmaxs[1] = models[midx].maxs[1] + wo[1];
+                tmaxs[2] = models[midx].maxs[2] + wo[2];
+                got_aabb = true;
+            }
+        }
+        if (!got_aabb) {
+            auto it_o2 = e.find("origin");
+            if (it_o2 != e.end()) {
+                std::istringstream vs(it_o2->second);
+                float ox2, oy2, oz2;
+                if (vs >> ox2 >> oy2 >> oz2) {
+                    const float r = 32.0f;
+                    tmins[0] = ox2 - r; tmins[1] = oy2 - r; tmins[2] = oz2 - r;
+                    tmaxs[0] = ox2 + r; tmaxs[1] = oy2 + r; tmaxs[2] = oz2 + r;
+                    got_aabb = true;
+                }
+            }
+        }
+        if (got_aabb)
+            door_activators[it_tgt->second] = {tmins[0], tmins[1], tmins[2], tmaxs[0], tmaxs[1], tmaxs[2]};
+    }
+
     f << "[\n";
     size_t written = 0;
     for (const auto& e : ent_list) {
@@ -629,16 +822,16 @@ static void write_triggers_json(
         get("target",     target);
         get("model",      model_key);
 
+        int model_idx = -1;
         if (!model_key.empty() && model_key[0] == '*') {
-            int idx = -1;
-            try { idx = std::stoi(model_key.substr(1)); } catch (...) {}
-            if (idx > 0 && idx < (int)models.size()) {
-                const BSPModel& mdl = models[idx];
+            try { model_idx = std::stoi(model_key.substr(1)); } catch (...) {}
+            if (model_idx > 0 && model_idx < (int)models.size()) {
+                const BSPModel& mdl = models[model_idx];
                 float wo[3] = {0.f, 0.f, 0.f};
-                if (idx < (int)bsp_world_origins.size()) {
-                    wo[0] = bsp_world_origins[idx][0];
-                    wo[1] = bsp_world_origins[idx][1];
-                    wo[2] = bsp_world_origins[idx][2];
+                if (model_idx < (int)bsp_world_origins.size()) {
+                    wo[0] = bsp_world_origins[model_idx][0];
+                    wo[1] = bsp_world_origins[model_idx][1];
+                    wo[2] = bsp_world_origins[model_idx][2];
                 }
                 mins[0] = mdl.mins[0] + wo[0]; mins[1] = mdl.mins[1] + wo[1]; mins[2] = mdl.mins[2] + wo[2];
                 maxs[0] = mdl.maxs[0] + wo[0]; maxs[1] = mdl.maxs[1] + wo[1]; maxs[2] = mdl.maxs[2] + wo[2];
@@ -664,6 +857,26 @@ static void write_triggers_json(
 
         if (!has_aabb) continue;
 
+        {
+            bool finite_ok = std::isfinite(origin[0]) && std::isfinite(origin[1]) && std::isfinite(origin[2])
+                          && std::isfinite(mins[0])   && std::isfinite(mins[1])   && std::isfinite(mins[2])
+                          && std::isfinite(maxs[0])   && std::isfinite(maxs[1])   && std::isfinite(maxs[2]);
+            if (!finite_ok) continue;
+        }
+
+        std::string pushdir_str, speed_str, message_str, radius_str, health_str;
+        std::string movedir_str, movedist_str, spawnpos_str, spawnflags_str, wait_str;
+        get("pushdir",     pushdir_str);
+        get("speed",       speed_str);
+        get("message",     message_str);
+        get("radius",      radius_str);
+        get("health",      health_str);
+        get("movedir",     movedir_str);
+        get("movedistance", movedist_str);
+        get("spawnpos",    spawnpos_str);
+        get("spawnflags",  spawnflags_str);
+        get("wait",        wait_str);
+
         if (written > 0) f << ",\n";
         f << "  {"
           << "\"class\":\"" << json_escape(cls) << "\""
@@ -672,8 +885,64 @@ static void write_triggers_json(
           << ",\"target\":\"" << json_escape(target) << "\""
           << ",\"origin\":[" << origin[0] << "," << origin[1] << "," << origin[2] << "]"
           << ",\"mins\":["   << mins[0]   << "," << mins[1]   << "," << mins[2]   << "]"
-          << ",\"maxs\":["   << maxs[0]   << "," << maxs[1]   << "," << maxs[2]   << "]"
-          << "}";
+          << ",\"maxs\":["   << maxs[0]   << "," << maxs[1]   << "," << maxs[2]   << "]";
+        if (type == "push") {
+            f << ",\"pushdir\":\"" << json_escape(pushdir_str) << "\""
+              << ",\"speed\":\""   << json_escape(speed_str)   << "\"";
+        }
+        if (type == "sound") {
+            f << ",\"message\":\"" << json_escape(message_str) << "\""
+              << ",\"radius\":\""  << json_escape(radius_str)  << "\""
+              << ",\"health\":\""  << json_escape(health_str)  << "\"";
+        }
+        if (type == "door" && model_idx >= 0 && !meshfiles.empty()) {
+            auto it_mf = meshfiles.find(model_idx);
+            if (it_mf != meshfiles.end()) {
+                f << ",\"meshfile\":\"" << json_escape(it_mf->second) << "\"";
+            }
+            float lip = 8.0f;
+            if (!movedist_str.empty()) {
+                try { lip = std::stof(movedist_str); } catch (...) {}
+            }
+            float move_speed = 100.0f;
+            if (!speed_str.empty()) {
+                try { move_speed = std::stof(speed_str); } catch (...) {}
+            }
+            float mdx = 0, mdy = 0, mdz = 0;
+            if (!movedir_str.empty()) {
+                std::istringstream mdss(movedir_str);
+                float mp, my2, mr; mdss >> mp >> my2 >> mr;
+                float mpr = mp * (3.14159265f / 180.0f);
+                float myr = my2 * (3.14159265f / 180.0f);
+                mdx = std::cos(mpr)*std::cos(myr);
+                mdy = std::cos(mpr)*std::sin(myr);
+                mdz = -std::sin(mpr);
+            }
+            float ext_x = maxs[0]-mins[0], ext_y = maxs[1]-mins[1], ext_z = maxs[2]-mins[2];
+            float dim = std::abs(mdx)*ext_x + std::abs(mdy)*ext_y + std::abs(mdz)*ext_z;
+            float dist = std::max(0.0f, dim - lip);
+            f << ",\"movedir\":\""  << json_escape(movedir_str)  << "\""
+              << ",\"movedist\":"   << dist
+              << ",\"speed\":"      << move_speed;
+            {
+                int spf = 0;
+                if (!spawnflags_str.empty()) { try { spf = std::stoi(spawnflags_str); } catch (...) {} }
+                float wait_secs = 3.0f;
+                if (!wait_str.empty()) { try { wait_secs = std::stof(wait_str); } catch (...) {} }
+                f << ",\"spawnflags\":" << spf
+                  << ",\"wait\":"       << wait_secs
+                  << ",\"spawnpos\":["  << origin[0] << "," << origin[1] << "," << origin[2] << "]";
+                if (!targetname.empty()) {
+                    auto it_act = door_activators.find(targetname);
+                    if (it_act != door_activators.end()) {
+                        const auto& ab = it_act->second;
+                        f << ",\"activator\":{\"mins\":[" << ab[0] << "," << ab[1] << "," << ab[2] << "]"
+                          << ",\"maxs\":[" << ab[3] << "," << ab[4] << "," << ab[5] << "]}";
+                    }
+                }
+            }
+        }
+        f << "}";
         ++written;
     }
 
@@ -683,7 +952,7 @@ static void write_triggers_json(
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        std::cerr << "Usage: bsp2obj <input.bsp> <output.obj> [--scale F] [--keep-tools] [--spawn-out FILE] [--props-out FILE] [--skybox-out FILE] [--sky-camera-out FILE] [--sky-radius F] [--triggers-out FILE]\n";
+        std::cerr << "Usage: bsp2obj <input.bsp> <output.obj> [--scale F] [--keep-tools] [--spawn-out FILE] [--props-out FILE] [--skybox-out FILE] [--sky-camera-out FILE] [--sky-radius F] [--triggers-out FILE] [--moving-brushes-dir DIR]\n";
         return 1;
     }
 
@@ -696,6 +965,7 @@ int main(int argc, char* argv[]) {
     std::string skybox_out;
     std::string sky_camera_out;
     std::string triggers_out;
+    std::string moving_brushes_dir;
     float sky_radius = 0.0f;
 
     for (int i = 3; i < argc; ++i) {
@@ -716,6 +986,8 @@ int main(int argc, char* argv[]) {
             sky_radius = std::stof(argv[++i]);
         } else if (arg == "--triggers-out" && i + 1 < argc) {
             triggers_out = argv[++i];
+        } else if (arg == "--moving-brushes-dir" && i + 1 < argc) {
+            moving_brushes_dir = argv[++i];
         }
     }
 
@@ -785,6 +1057,24 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    std::unordered_map<int, std::string> meshfiles;
+    if (!moving_brushes_dir.empty()) {
+        try {
+            write_entity_objs(bsp.entities, bsp.models, bsp.model_world_origins,
+                              faces, moving_brushes_dir, scale, meshfiles);
+            if (!meshfiles.empty()) {
+                std::set<int> door_model_indices;
+                for (const auto& kv : meshfiles) door_model_indices.insert(kv.first);
+                auto it = std::remove_if(faces.begin(), faces.end(), [&](const Face& f) {
+                    return door_model_indices.count(f.model_index) > 0;
+                });
+                faces.erase(it, faces.end());
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error writing entity OBJs: " << e.what() << "\n";
+        }
+    }
+
     std::string mtl_path = std::filesystem::path(obj_path).replace_extension(".mtl").string();
 
     try {
@@ -818,7 +1108,7 @@ int main(int argc, char* argv[]) {
 
     if (!triggers_out.empty()) {
         try {
-            write_triggers_json(bsp.entities, bsp.models, bsp.model_world_origins, triggers_out);
+            write_triggers_json(bsp.entities, bsp.models, bsp.model_world_origins, triggers_out, meshfiles);
         } catch (const std::exception& e) {
             std::cerr << "Error writing triggers JSON: " << e.what() << "\n";
         }

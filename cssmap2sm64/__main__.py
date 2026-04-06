@@ -84,7 +84,7 @@ def _decompress_valve_lzma(lump_bytes: bytes) -> bytes:
     return lzma.decompress(lzma_alone, format=lzma.FORMAT_ALONE)
 
 
-_LZMA_DECOMPRESS_LUMPS = {0, 1, 2, 3, 5, 6, 7, 12, 13, 18, 19, 26, 33, 35, 40, 43, 44}
+_LZMA_DECOMPRESS_LUMPS = {0, 1, 2, 3, 5, 6, 7, 12, 13, 14, 18, 19, 26, 33, 35, 40, 43, 44}
 
 
 def _normalize_bsp(src: Path, dst: Path) -> bool:
@@ -165,6 +165,8 @@ def main():
     cfg.setdefault("scale_factor", 1.0)
     cfg.setdefault("blender_to_sm64_scale", 300)
     cfg.setdefault("collision_divisor", 150)
+    cfg.setdefault("point_light_radius_mult", 5.0)
+    cfg.setdefault("point_light_intensity_mult", 1.0)
     cfg.setdefault("area_id", 1)
     cfg.setdefault("is_custom_level", True)
     cfg.setdefault("texture_resolution_limit", 512)
@@ -172,10 +174,18 @@ def main():
     cfg.setdefault("sky_map", {})
     cfg.setdefault("decimate_ratio", 1.0)
     cfg.setdefault("sky_radius", 0.0)
+    cfg.setdefault("max_visual_polys", 0)
 
     bsp = Path(args.bsp).resolve()
     if not bsp.exists():
         sys.exit(f"BSP file not found: {bsp}")
+
+    derived_level_name = re.sub(r'[^a-z0-9_]', '_', bsp.stem.lower())
+    if cfg.get("level_name") != derived_level_name:
+        cfg["level_name"] = derived_level_name
+        with open(config_path, "w") as _cfg_f:
+            json.dump(cfg, _cfg_f, indent=2)
+        print(f"  pipeline.json: level_name updated to {derived_level_name!r}")
 
     out = Path(args.output).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -199,6 +209,7 @@ def main():
     triggers_file  = out / (bsp.stem + ".triggers.json")
     sky_obj_path   = out / (bsp.stem + ".sky.obj")
     sky_cam_path   = out / (bsp.stem + ".sky_camera.json")
+    moving_brushes_dir = out / "moving_brushes"
     tex_dir     = out / "textures"
     if tex_dir.exists():
         shutil.rmtree(tex_dir)
@@ -219,6 +230,7 @@ def main():
         "--sky-camera-out", str(sky_cam_path),
         "--sky-radius", str(cfg["sky_radius"]),
         "--triggers-out", str(triggers_file),
+        "--moving-brushes-dir", str(moving_brushes_dir),
     ]
     if args.keep_tools:
         bsp2obj_cmd.append("--keep-tools")
@@ -344,10 +356,71 @@ def main():
     else:
         sky_cube_obj_path = None
 
-    if args.no_blend:
-        print(f"[3/5] Skipped (--no-blend). OBJ: {obj_path}")
+    # --- Collision: generate directly from OBJ (bypasses Fast64 for collision) ---
+    print("[2c/4] Generating collision from OBJ (direct bypass)...")
+    import time as _col_time
+    _col_t0 = _col_time.monotonic()
+    _net = cfg["blender_to_sm64_scale"] / cfg["collision_divisor"]
+    _pre_collision = out / (bsp.stem + ".collision.inc.c")
+    f64_to_native.generate_collision_from_obj(obj_path, _pre_collision, cfg["level_name"], _net)
+    print(f"  Collision generated in {_col_time.monotonic() - _col_t0:.1f}s")
+
+    if args.no_blend or args.collision_only:
+        level_name = cfg["level_name"]
+        sm64_port_path = cfg.get("sm64_port_path", "")
+        if sm64_port_path:
+            sm64_port = Path(sm64_port_path)
+            dest = sm64_port / "levels" / level_name
+            col_dest = dest / "areas" / "1" / "collision.inc.c"
+            if col_dest.exists() and _pre_collision.exists():
+                shutil.copy2(_pre_collision, col_dest)
+                print(f"  -> collision.inc.c deployed to {col_dest}")
+                if triggers_file.exists():
+                    entities_dest = dest / "entities.inc.c"
+                    if entities_dest.exists():
+                        import json as _ejson
+                        _triggers_data = _ejson.loads(triggers_file.read_text(encoding="utf-8"))
+                        _net = cfg["blender_to_sm64_scale"] / cfg["collision_divisor"]
+                        f64_to_native._write_entities_inc(
+                            entities_dest,
+                            level_name,
+                            _triggers_data,
+                            cfg["scale_factor"],
+                            _net,
+                            sm64_spawn,
+                        )
+                        print(f"  -> entities.inc.c deployed to {entities_dest}")
+            if moving_brushes_dir.exists() and dest.exists():
+                import json as _mjson
+                _triggers_data = _mjson.loads(triggers_file.read_text(encoding="utf-8")) if triggers_file.exists() else []
+                _net2 = cfg["blender_to_sm64_scale"] / cfg["collision_divisor"]
+                f64_to_native.convert_moving_platforms(
+                    _triggers_data,
+                    moving_brushes_dir,
+                    dest,
+                    level_name,
+                    cfg["scale_factor"],
+                    _net2,
+                    dest / "script.c",
+                    dest / "leveldata.c",
+                    dest / "header.h",
+                )
+                print("  -> moving platforms generated")
+            elif not col_dest.exists():
+                print(f"  [warn] {dest} not yet deployed — run full pipeline first, then use --collision-only")
+        print(f"[3/5] Skipped ({'--collision-only' if args.collision_only else '--no-blend'}). OBJ: {obj_path}")
         print(f"Done. Output in {out}/")
         return
+
+    # --- Auto-decimate: count OBJ faces, limit visual polys sent to Fast64 ---
+    #_max_vis = cfg["max_visual_polys"]
+    #_decimate_ratio = cfg["decimate_ratio"]
+    #if _max_vis > 0 and obj_path.exists():
+    #    _face_count = sum(1 for _ln in open(obj_path, encoding="utf-8", errors="replace") if _ln.startswith("f "))
+    #    print(f"  OBJ faces: {_face_count}")
+    #    if _face_count > _max_vis:
+    #        _decimate_ratio = min(_decimate_ratio, _max_vis / _face_count)
+    #        print(f"  Auto-decimate: ratio={_decimate_ratio:.3f} (max_visual_polys={_max_vis})")
 
     print("[3/4] Exporting to SM64 via Blender/Fast64...")
     sm64_out = out / "sm64_level"
@@ -362,7 +435,7 @@ def main():
         spawn=spawn_bl,
         materials_json=materials_json,
         background=background,
-        decimate_ratio=cfg["decimate_ratio"],
+        decimate_ratio=1.0,#_decimate_ratio,
         props_json=props_file if props_file.exists() else None,
         bsp_scale=cfg["scale_factor"],
         env_json=env_json_path,
@@ -389,7 +462,28 @@ def main():
         triggers_json=triggers_file if triggers_file.exists() else None,
         scale_factor=cfg["scale_factor"],
         blender_to_sm64_scale=cfg["blender_to_sm64_scale"],
+        point_light_radius_mult=cfg["point_light_radius_mult"],
+        point_light_intensity_mult=cfg["point_light_intensity_mult"],
     )
+    if _pre_collision.exists():
+        import shutil as _colshutil
+        _colshutil.copy2(_pre_collision, native_out / "areas" / "1" / "collision.inc.c")
+        print("  -> collision.inc.c replaced with direct-generated version")
+    if triggers_file.exists() and moving_brushes_dir.exists():
+        _net2 = cfg["blender_to_sm64_scale"] / cfg["collision_divisor"]
+        _triggers_data = json.loads(triggers_file.read_text(encoding="utf-8"))
+        f64_to_native.convert_moving_platforms(
+            _triggers_data,
+            moving_brushes_dir,
+            native_out,
+            level_name,
+            cfg["scale_factor"],
+            _net2,
+            native_out / "script.c",
+            native_out / "leveldata.c",
+            native_out / "header.h",
+        )
+        print("  -> moving platforms generated")
     if sky_obj_path.exists() and sky_camera_data is not None:
         print("[4b/5] Converting sky Fast64 output to native format...")
         sky_level_name = level_name + "_sky"

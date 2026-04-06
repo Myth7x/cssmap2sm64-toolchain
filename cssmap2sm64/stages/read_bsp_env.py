@@ -1,3 +1,4 @@
+import math
 import re
 import struct
 
@@ -133,5 +134,62 @@ def read_env(bsp_path):
 
     if sky_cam_result is not None:
         light_result["sky_camera"] = sky_cam_result
+
+    point_lights = []
+    for block in blocks:
+        cn_m = re.search(r'"classname"\s+"([^"]*)"', block, re.IGNORECASE)
+        if cn_m is None:
+            continue
+        cn = cn_m.group(1).lower()
+        if cn not in ("light", "light_spot"):
+            continue
+
+        def get_pl(key, default=""):
+            pm = re.search(r'"' + re.escape(key) + r'"\s+"([^"]*)"', block, re.IGNORECASE)
+            return pm.group(1).strip() if pm else default
+
+        if get_pl("style", "0") != "0":
+            continue
+
+        origin_str = get_pl("origin", "0 0 0")
+        try:
+            ox, oy, oz = [float(v) for v in origin_str.split()]
+        except ValueError:
+            continue
+
+        light_str = get_pl("_light", "255 255 255 200")
+        parts = light_str.strip().split()
+        try:
+            lr, lg, lb = int(parts[0]) / 255.0, int(parts[1]) / 255.0, int(parts[2]) / 255.0
+            raw_intensity = float(parts[3]) if len(parts) >= 4 else 200.0
+        except (ValueError, IndexError):
+            continue
+
+        try:
+            dist = float(get_pl("distance", "0") or "0")
+            kq   = float(get_pl("_quadratic_attn", "0") or "0")
+            kl   = float(get_pl("_linear_attn", "0") or "0")
+        except ValueError:
+            dist, kq, kl = 0.0, 0.0, 0.0
+
+        if dist > 0:
+            radius_bsp = dist
+        elif kq > 1e-9:
+            radius_bsp = math.sqrt(raw_intensity / (kq * 0.05))
+        elif kl > 1e-9:
+            radius_bsp = raw_intensity / (kl * 0.05)
+        else:
+            radius_bsp = 512.0
+
+        point_lights.append({
+            "origin": [ox, oy, oz],
+            "color": [lr, lg, lb],
+            "intensity": raw_intensity / 200.0,
+            "radius_bsp": radius_bsp,
+        })
+
+    point_lights.sort(key=lambda pl: pl["intensity"], reverse=True)
+    if point_lights:
+        light_result["point_lights"] = point_lights[:8]
 
     return light_result

@@ -13,4 +13,6 @@ def build_parser():
                    help="Include tool-textured faces in OBJ output")
     p.add_argument("--no-blend", action="store_true",
                    help="Stop after OBJ export (skip Blender/Fast64 stage)")
+    p.add_argument("--collision-only", action="store_true",
+                   help="Regenerate and deploy only collision.inc.c (skip Blender, requires existing deployment)")
     return p

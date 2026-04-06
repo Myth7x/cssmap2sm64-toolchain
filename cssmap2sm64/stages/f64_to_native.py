@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import re
@@ -151,7 +152,8 @@ def _write_script(
 
 
 
-def _write_level_lighting(dst: Path, env: dict) -> None:
+def _write_level_lighting(dst: Path, env: dict, scale_factor: float = 1.0, net: float = 1.0,
+                          pl_radius_mult: float = 5.0, pl_intensity_mult: float = 1.0) -> None:
     pitch = env.get("sun_pitch", -45.0)
     yaw_deg = env.get("sun_yaw", 0.0)
     elev = math.radians(-pitch)
@@ -162,6 +164,7 @@ def _write_level_lighting(dst: Path, env: dict) -> None:
     ar, ag, ab = env.get("ambient_color", [0.3, 0.3, 0.3])
     sr, sg, sb = env.get("sun_color", [1.0, 1.0, 1.0])
     fog = env.get("fog", None)
+    point_lights = env.get("point_lights", [])
     lines = [
         '#include "src/pc/gfx/level_lights.h"',
         '#include "level_table.h"',
@@ -171,6 +174,16 @@ def _write_level_lighting(dst: Path, env: dict) -> None:
         '    level_lights_set_shadow_count(1);',
         '    level_lights_compute_shadow_vp_sun(0, 0.0f, 0.0f, 0.0f, 10000.0f);',
     ]
+    for pl in point_lights[:8]:
+        ox, oy, oz = pl["origin"]
+        px, py, pz = _bsp_to_sm64(ox, oy, oz, scale_factor, net)
+        radius = pl["radius_bsp"] * scale_factor * net * pl_radius_mult
+        r, g, b = pl["color"]
+        intensity = pl["intensity"] * pl_intensity_mult
+        lines.append(
+            f'    {{ LevelLight _pl = {{{{{px:.1f}f, {py:.1f}f, {pz:.1f}f}}, {radius:.1f}f,'
+            f' {{{r:.6f}f, {g:.6f}f, {b:.6f}f}}, {intensity:.6f}f}}; level_lights_add(&_pl); }}'
+        )
     if fog:
         fr, fg_c, fb = fog["fog_color"]
         lines.append(
@@ -203,7 +216,89 @@ def _write_level_yaml(dst: Path, level_name: str, skybox_bin: str = "water") -> 
     dst.write_text(content, encoding="utf-8")
 
 
-def _split_large_collision_blocks(path: Path, max_verts: int = 32767) -> None:
+_MAX_TRIS_PER_GROUP: int = 65535
+_MAX_VERTS_PER_BLOCK: int = 65535
+
+
+def generate_collision_from_obj(obj_path: Path, out_path: Path, level_name: str, net: float) -> None:
+    import io as _io
+
+    vertices: list = []
+    faces: list = []
+
+    with open(obj_path, encoding="utf-8", errors="replace") as _f:
+        for line in _f:
+            if line.startswith("v "):
+                p = line.split()
+                vertices.append((float(p[1]), float(p[2]), float(p[3])))
+            elif line.startswith("f "):
+                p = line.split()[1:]
+                idx = [int(pt.split("/")[0]) - 1 for pt in p]
+                for i in range(1, len(idx) - 1):
+                    a, b, c = idx[0], idx[i], idx[i + 1]
+                    v1, v2, v3 = vertices[a], vertices[b], vertices[c]
+                    ax, ay, az = v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2]
+                    bx, by, bz = v3[0]-v2[0], v3[1]-v2[1], v3[2]-v2[2]
+                    ny = az * bx - ax * bz
+                    if ny < 0:
+                        faces.append((a, c, b))
+                    else:
+                        faces.append((a, b, c))
+
+    array_name = f"{level_name}_area_1_collision"
+
+    blocks: list = []
+    cur_vmap: dict = {}
+    cur_verts: list = []
+    cur_tris: list = []
+
+    for i0, i1, i2 in faces:
+        needed = sum(1 for v in (i0, i1, i2) if v not in cur_vmap)
+        if len(cur_verts) + needed > _MAX_VERTS_PER_BLOCK:
+            if cur_verts:
+                blocks.append((list(cur_verts), list(cur_tris)))
+            cur_vmap = {}
+            cur_verts = []
+            cur_tris = []
+        local = []
+        for v in (i0, i1, i2):
+            if v not in cur_vmap:
+                cur_vmap[v] = len(cur_verts)
+                cur_verts.append(v)
+            local.append(cur_vmap[v])
+        cur_tris.append((local[0], local[1], local[2]))
+
+    if cur_verts:
+        blocks.append((list(cur_verts), list(cur_tris)))
+
+    def _sm64(v_idx: int):
+        x, y, z = vertices[v_idx]
+        return (
+            max(-32767, min(32767, round(x * net))),
+            max(-32767, min(32767, round(y * net))),
+            max(-32767, min(32767, round(z * net))),
+        )
+
+    buf = _io.StringIO()
+    buf.write(f"const Collision {array_name}[] = {{\n")
+    for vert_indices, tris in blocks:
+        buf.write("\tCOL_INIT(),\n")
+        buf.write(f"\tCOL_VERTEX_INIT({len(vert_indices)}),\n")
+        for vi in vert_indices:
+            sx, sy, sz = _sm64(vi)
+            buf.write(f"\tCOL_VERTEX({sx}, {sy}, {sz}),\n")
+        for chunk_start in range(0, len(tris), _MAX_TRIS_PER_GROUP):
+            chunk = tris[chunk_start:chunk_start + _MAX_TRIS_PER_GROUP]
+            buf.write(f"\tCOL_TRI_INIT(SURFACE_DEFAULT, {len(chunk)}),\n")
+            for v0, v1, v2 in chunk:
+                buf.write(f"\tCOL_TRI({v0}, {v1}, {v2}),\n")
+            buf.write("\tCOL_TRI_STOP(),\n")
+    buf.write("\tCOL_END()\n};\n")
+
+    out_path.write_text(buf.getvalue(), encoding="utf-8")
+
+
+def _split_large_collision_blocks(path: Path, max_verts: int = 65535) -> None:
     text = path.read_text(encoding="utf-8")
     m = re.search(r'COL_VERTEX_INIT\((\d+)\)', text)
     if not m or int(m.group(1)) <= max_verts:
@@ -269,10 +364,12 @@ def _split_large_collision_blocks(path: Path, max_verts: int = 32767) -> None:
         for x, y, z in verts:
             out += f"\tCOL_VERTEX({x}, {y}, {z}),\n"
         for surf_type, tris in tris_by_type.items():
-            out += f"\tCOL_TRI_INIT({surf_type}, {len(tris)}),\n"
-            for v1, v2, v3 in tris:
-                out += f"\tCOL_TRI({v1}, {v2}, {v3}),\n"
-        out += "\tCOL_TRI_STOP(),\n"
+            for chunk_start in range(0, len(tris), _MAX_TRIS_PER_GROUP):
+                chunk = tris[chunk_start:chunk_start + _MAX_TRIS_PER_GROUP]
+                out += f"\tCOL_TRI_INIT({surf_type}, {len(chunk)}),\n"
+                for v1, v2, v3 in chunk:
+                    out += f"\tCOL_TRI({v1}, {v2}, {v3}),\n"
+                out += "\tCOL_TRI_STOP(),\n"
 
     if specials_m:
         out += "\t" + specials_m.group(1).strip() + "\n"
@@ -291,6 +388,7 @@ _EBOX_TYPE = {
     "brush":    5,
     "logic":    6,
     "landmark": 7,
+    "push":     8,
 }
 
 _EBOX_TYPE_NAME = {v: k for k, v in _EBOX_TYPE.items()}
@@ -315,6 +413,7 @@ def _write_entities_inc(
     triggers: list,
     scale_factor: float,
     net: float,
+    sm64_spawn: Optional[Tuple[int, int, int]] = None,
 ) -> None:
     landmark_map = {
         e['targetname']: e['origin']
@@ -342,10 +441,31 @@ def _write_entities_inc(
         r_mny, r_mxy = min(sm64_mny, sm64_mxy), max(sm64_mny, sm64_mxy)
         r_mnz, r_mxz = min(sm64_mnz, sm64_mxz), max(sm64_mnz, sm64_mxz)
         if ttype == _EBOX_TYPE['teleport']:
+            _MIN_EXT, _TARGET_EXT = 128, 256
+            if r_mxx - r_mnx < _MIN_EXT:
+                cx = (r_mnx + r_mxx) // 2
+                r_mnx, r_mxx = cx - _TARGET_EXT // 2, cx + _TARGET_EXT // 2
+            if r_mxy - r_mny < _MIN_EXT:
+                cy = (r_mny + r_mxy) // 2
+                r_mny, r_mxy = cy - _TARGET_EXT // 2, cy + _TARGET_EXT // 2
+            if r_mxz - r_mnz < _MIN_EXT:
+                cz = (r_mnz + r_mxz) // 2
+                r_mnz, r_mxz = cz - _TARGET_EXT // 2, cz + _TARGET_EXT // 2
+        if ttype == _EBOX_TYPE['teleport']:
             target_name = t.get('target', '')
             bsp_origin = landmark_map.get(target_name, [0, 0, 0])
             dx, dy, dz = _bsp_to_sm64(bsp_origin[0], bsp_origin[1], bsp_origin[2], scale_factor, net)
             dest_x, dest_y, dest_z = _clamp_s16(dx), _clamp_s16(dy), _clamp_s16(dz)
+        elif ttype == _EBOX_TYPE['push']:
+            pushdir_str = t.get('pushdir', '0 0 0')
+            speed = float(t.get('speed', 0) or 0)
+            parts = [float(s) for s in (pushdir_str or '0 0 0').split()]
+            pitch_rad = math.radians(parts[0] if len(parts) > 0 else 0.0)
+            yaw_rad = math.radians(parts[1] if len(parts) > 1 else 0.0)
+            spf = speed * scale_factor * net / 30.0
+            dest_x = _clamp_s16(round(math.cos(pitch_rad) * math.cos(yaw_rad) * spf))
+            dest_y = _clamp_s16(round(-math.sin(pitch_rad) * spf))
+            dest_z = _clamp_s16(round(-math.cos(pitch_rad) * math.sin(yaw_rad) * spf))
         else:
             dest_x, dest_y, dest_z = 0, 0, 0
         lines.append(
@@ -359,6 +479,11 @@ def _write_entities_inc(
         '};',
         '',
         f's32 {level_name}_entities_init(UNUSED s16 arg, UNUSED s32 unused) {{',
+    ]
+    if sm64_spawn is not None:
+        x, y, z = sm64_spawn
+        lines.append(f'    entity_boxes_set_default_spawn({x}.0f, {y}.0f, {z}.0f);')
+    lines += [
         f'    entity_boxes_register({level_name}_entity_boxes);',
         '    return 0;',
         '}',
@@ -499,6 +624,8 @@ def convert(
     triggers_json: Optional[Path] = None,
     scale_factor: float = 1.0,
     blender_to_sm64_scale: float = 300.0,
+    point_light_radius_mult: float = 5.0,
+    point_light_intensity_mult: float = 1.0,
 ) -> None:
     fast64_dir = Path(fast64_dir)
     out_dir = Path(out_dir)
@@ -536,7 +663,11 @@ def convert(
         if env_path.exists():
             with open(env_path, encoding="utf-8") as _f:
                 env = json.load(_f)
-            _write_level_lighting(out_dir / "level_lighting.inc.c", env)
+            _write_level_lighting(
+                out_dir / "level_lighting.inc.c", env,
+                scale_factor, blender_to_sm64_scale / collision_divisor,
+                point_light_radius_mult, point_light_intensity_mult,
+            )
 
     _write_leveldata(out_dir / "leveldata.c", level_name, has_lighting=(env is not None))
 
@@ -557,6 +688,7 @@ def convert(
             triggers,
             scale_factor,
             net,
+            sm64_spawn,
         )
         _patch_header_entities(out_dir / "header.h", level_name)
         ld_path = out_dir / "leveldata.c"
@@ -576,6 +708,301 @@ def convert(
     _write_level_yaml(out_dir / "level.yaml", level_name, skybox_bin)
 
     (out_dir / "texture.inc.c").write_text("", encoding="utf-8")
+
+
+_GFX_MAX_CACHE: int = 32
+
+
+def generate_dl_from_obj(obj_path: Path, out_path: Path, array_name: str, net: float) -> None:
+    import io as _io
+
+    raw_verts: list = []
+    faces: list = []
+
+    with open(obj_path, encoding="utf-8", errors="replace") as _f:
+        for line in _f:
+            if line.startswith("v "):
+                p = line.split()
+                raw_verts.append((float(p[1]), float(p[2]), float(p[3])))
+            elif line.startswith("f "):
+                p = line.split()[1:]
+                idx = [int(pt.split("/")[0]) - 1 for pt in p]
+                for i in range(1, len(idx) - 1):
+                    faces.append((idx[0], idx[i], idx[i + 1]))
+
+    def _s16(v: float) -> int:
+        return max(-32767, min(32767, round(v * net)))
+
+    batches: list = []
+    cur_vmap: dict = {}
+    cur_verts: list = []
+    cur_tris: list = []
+
+    for tri in faces:
+        needed = [v for v in tri if v not in cur_vmap]
+        if len(cur_verts) + len(needed) > _GFX_MAX_CACHE:
+            if cur_verts:
+                batches.append((list(cur_verts), list(cur_tris)))
+            cur_vmap = {}
+            cur_verts = []
+            cur_tris = []
+            needed = list(tri)
+        for v in needed:
+            cur_vmap[v] = len(cur_verts)
+            cur_verts.append(v)
+        cur_tris.append(tuple(cur_vmap[v] for v in tri))
+
+    if cur_verts:
+        batches.append((cur_verts, cur_tris))
+
+    all_verts: list = []
+    batch_offsets: list = []
+    for verts, _ in batches:
+        batch_offsets.append(len(all_verts))
+        all_verts.extend(verts)
+
+    buf = _io.StringIO()
+    buf.write(f"Vtx {array_name}_vtx[{len(all_verts)}] = {{\n")
+    for gv in all_verts:
+        x, y, z = raw_verts[gv]
+        buf.write(f"    {{{{{{{_s16(x)}, {_s16(y)}, {_s16(z)}}}, 0, {{0, 0}}, {{0x80, 0x80, 0x80, 0xFF}}}}}},\n")
+    buf.write("};\n\n")
+
+    buf.write(f"Gfx {array_name}_dl[] = {{\n")
+    buf.write("    gsDPPipeSync(),\n")
+    buf.write("    gsDPSetCombineMode(G_CC_SHADE, G_CC_SHADE),\n")
+
+    for bi, (verts, tris) in enumerate(batches):
+        n = len(verts)
+        off = batch_offsets[bi]
+        buf.write(f"    gsSPVertex({array_name}_vtx + {off}, {n}, 0),\n")
+        i = 0
+        while i < len(tris):
+            if i + 1 < len(tris):
+                t0, t1 = tris[i], tris[i + 1]
+                buf.write(
+                    f"    gsSP2Triangles({t0[0]}, {t0[1]}, {t0[2]}, 0x0,"
+                    f" {t1[0]}, {t1[1]}, {t1[2]}, 0x0),\n"
+                )
+                i += 2
+            else:
+                t0 = tris[i]
+                buf.write(f"    gsSP1Triangle({t0[0]}, {t0[1]}, {t0[2]}, 0),\n")
+                i += 1
+
+    buf.write("    gsSPEndDisplayList(),\n")
+    buf.write("};\n")
+
+    out_path.write_text(buf.getvalue(), encoding="utf-8")
+
+
+def convert_moving_platforms(
+    triggers: list,
+    moving_brushes_dir: Path,
+    out_dir: Path,
+    level_name: str,
+    scale_factor: float,
+    net: float,
+    script_path: Path,
+    leveldata_path: Path,
+    header_path: Path,
+) -> None:
+    import io as _io
+
+    moving_brushes_dir = Path(moving_brushes_dir)
+    out_dir = Path(out_dir)
+    script_path = Path(script_path)
+    leveldata_path = Path(leveldata_path)
+    header_path = Path(header_path)
+
+    door_triggers = [t for t in triggers if t.get("type") == "door" and t.get("meshfile")]
+    if not door_triggers:
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    plat_inc_lines: list = []
+    plat_inc_lines.append('#include <ultra64.h>')
+    plat_inc_lines.append('#include "sm64.h"')
+    plat_inc_lines.append('#include "game/bhv_moving_platform.h"')
+    plat_inc_lines.append('')
+
+    struct_entries: list = []
+    model_ids: list = []
+    object_macros: list = []
+    load_macros: list = []
+    _hash_to_model_id: dict = {}
+    _hash_to_ref_name: dict = {}
+    _next_model_id = 0xE2
+    _unique_meshes: list = []
+
+    for idx, t in enumerate(door_triggers):
+        meshfile = t["meshfile"]
+        obj_path = moving_brushes_dir / meshfile
+        if not obj_path.exists():
+            continue
+
+        array_name = f"{level_name}_moving_{idx}"
+        obj_hash = hashlib.md5(obj_path.read_bytes()).hexdigest()
+        if obj_hash in _hash_to_model_id:
+            model_id = _hash_to_model_id[obj_hash]
+            ref_name = _hash_to_ref_name[obj_hash]
+        else:
+            if _next_model_id > 0xFF:
+                continue
+            model_id = _next_model_id
+            _next_model_id += 1
+            ref_name = array_name
+            _hash_to_model_id[obj_hash] = model_id
+            _hash_to_ref_name[obj_hash] = ref_name
+            _unique_meshes.append((idx, model_id, ref_name, obj_path))
+
+        spawnpos = t.get("spawnpos", t["origin"])
+        ox, oy, oz = spawnpos[0], spawnpos[1], spawnpos[2]
+        sm_sx = _clamp_s16(round(ox * scale_factor * net))
+        sm_sy = _clamp_s16(round(oz * scale_factor * net))
+        sm_sz = _clamp_s16(round(-oy * scale_factor * net))
+
+        movedir_str = t.get("movedir", "0 0 0") or "0 0 0"
+        movedist = float(t.get("movedist", 0) or 0)
+        speed = float(t.get("speed", 100) or 100)
+        parts = [float(s) for s in movedir_str.split()]
+        pitch_rad = math.radians(parts[0] if len(parts) > 0 else 0.0)
+        yaw_rad = math.radians(parts[1] if len(parts) > 1 else 0.0)
+        bsp_dx = math.cos(pitch_rad) * math.cos(yaw_rad)
+        bsp_dy = math.cos(pitch_rad) * math.sin(yaw_rad)
+        bsp_dz = -math.sin(pitch_rad)
+        sm64_ex = _clamp_s16(round((ox + bsp_dx * movedist) * scale_factor * net))
+        sm64_ey = _clamp_s16(round((oz + bsp_dz * movedist) * scale_factor * net))
+        sm64_ez = _clamp_s16(round((-oy - bsp_dy * movedist) * scale_factor * net))
+
+        dist_sm64 = movedist * scale_factor * net
+        period = max(1, round(dist_sm64 / max(1.0, speed * scale_factor * net / 30.0)))
+
+        spawnflags = int(t.get("spawnflags", 0) or 0)
+        _wait_val = t.get("wait")
+        wait_secs = float(_wait_val) if _wait_val is not None else 3.0
+        activator = t.get("activator")
+
+        is_use = bool(spawnflags & 256)
+        is_touch = activator is not None and not is_use
+        is_step = movedist > 0 and not is_use and not is_touch
+        mode = 2 if is_use else (1 if is_touch else (3 if is_step else 0))
+
+        if wait_secs == -1.0:
+            wait_frames = -1
+        else:
+            wait_frames = _clamp_s16(round(wait_secs * 30))
+
+        if activator and mode != 0:
+            act_mnx = _clamp_s16(round(activator["mins"][0] * scale_factor * net))
+            act_mny = _clamp_s16(round(activator["mins"][2] * scale_factor * net))
+            act_mnz = _clamp_s16(round(-activator["maxs"][1] * scale_factor * net))
+            act_mxx = _clamp_s16(round(activator["maxs"][0] * scale_factor * net))
+            act_mxy = _clamp_s16(round(activator["maxs"][2] * scale_factor * net))
+            act_mxz = _clamp_s16(round(-activator["mins"][1] * scale_factor * net))
+            r_act_mnx, r_act_mxx = min(act_mnx, act_mxx), max(act_mnx, act_mxx)
+            r_act_mny, r_act_mxy = min(act_mny, act_mxy), max(act_mny, act_mxy)
+            r_act_mnz, r_act_mxz = min(act_mnz, act_mxz), max(act_mnz, act_mxz)
+        else:
+            r_act_mnx = r_act_mny = r_act_mnz = 0
+            r_act_mxx = r_act_mxy = r_act_mxz = 0
+
+        struct_entries.append(
+            f"    {{{{{sm_sx}, {sm_sy}, {sm_sz}}}, {{{sm64_ex}, {sm64_ey}, {sm64_ez}}},"
+            f" {period}, {wait_frames}, {mode}, {{0, 0, 0}},"
+            f" {{{r_act_mnx}, {r_act_mny}, {r_act_mnz}}}, {{{r_act_mxx}, {r_act_mxy}, {r_act_mxz}}},"
+            f" {ref_name}_area_1_collision}},"
+        )
+
+        beh_param = (idx & 0xFF) << 16
+        object_macros.append(
+            f"\t\tOBJECT(0x{model_id:02X}, {sm_sx}, {sm_sy}, {sm_sz},"
+            f" 0, 0, 0, 0x{beh_param:08X}, bhvCustomMovingPlatform),"
+        )
+        model_ids.append(model_id)
+
+    for uid_idx, uid_model_id, uid_ref_name, uid_obj_path in _unique_meshes:
+        dl_inc = out_dir / f"moving_{uid_idx}.inc.c"
+        col_inc = out_dir / f"moving_{uid_idx}_col.inc.c"
+        generate_dl_from_obj(uid_obj_path, dl_inc, uid_ref_name, net)
+        generate_collision_from_obj(uid_obj_path, col_inc, uid_ref_name, net)
+        plat_inc_lines.append(f'#include "levels/{level_name}/moving_{uid_idx}.inc.c"')
+        plat_inc_lines.append(f'#include "levels/{level_name}/moving_{uid_idx}_col.inc.c"')
+        plat_inc_lines.append('')
+        load_macros.append(
+            f"\t\tLOAD_MODEL_FROM_DL(0x{uid_model_id:02X}, {uid_ref_name}_dl, LAYER_OPAQUE),"
+        )
+
+    if not struct_entries:
+        return
+
+    plat_inc_lines.append(f'static const struct LevelMovingPlatform {level_name}_moving_platforms[] = {{')
+    plat_inc_lines.extend(struct_entries)
+    plat_inc_lines.append('};')
+    plat_inc_lines.append('')
+    plat_inc_lines.append(f'__attribute__((constructor)) static void s_{level_name}_register_platforms(void) {{')
+    plat_inc_lines.append(f'    moving_platform_register({level_name}_moving_platforms);')
+    plat_inc_lines.append('}')
+    plat_inc_lines.append('')
+
+    (out_dir / "moving_platforms.inc.c").write_text('\n'.join(plat_inc_lines), encoding='utf-8')
+
+    ld_text = leveldata_path.read_text(encoding='utf-8')
+    mp_include = f'#include "levels/{level_name}/moving_platforms.inc.c"\n'
+    if mp_include not in ld_text:
+        leveldata_path.write_text(ld_text + mp_include, encoding='utf-8')
+
+    hdr_text = header_path.read_text(encoding='utf-8')
+    mp_hdr = '#include "game/bhv_moving_platform.h"\n'
+    extern_decls = ''.join(
+        f'extern Gfx {uid_ref_name}_dl[];\n'
+        for _, uid_model_id, uid_ref_name, uid_obj_path in _unique_meshes
+    )
+    block_to_add = ''
+    if mp_hdr not in hdr_text:
+        block_to_add += mp_hdr
+    for line in extern_decls.splitlines(keepends=True):
+        if line not in hdr_text:
+            block_to_add += line
+    if block_to_add:
+        hdr_text = hdr_text.rstrip()
+        if hdr_text.endswith('#endif'):
+            hdr_text = hdr_text[:-6].rstrip() + '\n\n' + block_to_add + '#endif\n'
+        else:
+            hdr_text += '\n' + block_to_add
+        header_path.write_text(hdr_text, encoding='utf-8')
+
+    if not load_macros and not object_macros:
+        return
+
+    script_text = script_path.read_text(encoding='utf-8')
+    load_block = '\n'.join(load_macros) + '\n'
+    obj_block = '\n'.join(object_macros) + '\n'
+
+    script_text = re.sub(
+        r'[ \t]*LOAD_MODEL_FROM_DL\(0x[0-9A-Fa-f]+,\s*' + re.escape(level_name) + r'_moving_\d+_dl[^\n]*\n',
+        '', script_text,
+    )
+    script_text = re.sub(
+        r'[ \t]*OBJECT\(0x[0-9A-Fa-f]+,[^\n]*bhvCustomMovingPlatform\),\n',
+        '', script_text,
+    )
+
+    if load_macros:
+        script_text = re.sub(
+            r'([ \t]*ALLOC_LEVEL_POOL\s*\(\s*\)\s*,[ \t]*\n)',
+            r'\1' + load_block,
+            script_text, count=1,
+        )
+    if object_macros:
+        script_text = re.sub(
+            r'(\s*END_AREA\s*\(\s*\)\s*,)',
+            '\n' + obj_block + r'\1',
+            script_text, count=1,
+        )
+
+    script_path.write_text(script_text, encoding='utf-8')
 
 
 def convert_sky(

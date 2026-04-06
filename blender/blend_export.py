@@ -113,6 +113,7 @@ def main():
     parser.add_argument("--sky-camera-json", default=None)
     parser.add_argument("--sky-cube-obj", default=None)
     parser.add_argument("--triggers-json", default=None)
+    parser.add_argument("--moving-brushes-dir", default=None)
     args = parser.parse_args(argv)
 
     mat_props = {}
